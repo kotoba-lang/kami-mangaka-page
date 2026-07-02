@@ -10,7 +10,8 @@
 
  :deps {org.clojure/clojure        {:mvn/version "1.12.0"}
         ;; shared multilingual lettering layer (locale-keyed MangaText)
-        gftd/kami-mangaka-text-clj {:local/root "../kami-mangaka-text-clj"}}
+        gftd/kami-mangaka-text-clj {:git/url "https://github.com/kotoba-lang/kami-mangaka-text-clj.git"
+                                    :sha "978b9c252dcb953ad8c420f5c22152da1ab70478"}}
 
  :aliases
  {:test {:extra-paths ["test"]
