@@ -1,0 +1,7 @@
+;; kami-mangaka-page-clj — task runner. Pure DTP library; bb runs the tests.
+{:min-bb-version "1.0.0"
+ :paths ["src" "test"]
+ :tasks
+ {:requires ([babashka.process :as p])
+  test {:doc "Run the page-composition tests (templates / layout / headless compose)"
+        :task (p/shell "clojure -M:test")}}}

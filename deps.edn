@@ -1,0 +1,20 @@
+;; kami-mangaka-page-clj — work-agnostic graphic-novel PAGE composition.
+;;
+;; The komawari (コマ割り) + DTP half: place rendered panel images into a B5 page,
+;; draw frames + gutters, overlay dialogue bubbles + narration captions. Ported
+;; from mangaka.gftd.ai's manga-layouts.ts GRAPHIC_NOVEL_TEMPLATES (ADR-2606282100).
+;; JVM/Java2D headless — no Canvas-2D, no GPU; this is page DTP, not the wgpu path.
+;;
+;; Sibling of kami-mangaka-render-clj (2D panels) and kami-mangaka-scene (3D).
+{:paths ["src"]
+
+ :deps {org.clojure/clojure        {:mvn/version "1.12.0"}
+        ;; shared multilingual lettering layer (locale-keyed MangaText)
+        gftd/kami-mangaka-text-clj {:local/root "../kami-mangaka-text-clj"}}
+
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps  {io.github.cognitect-labs/test-runner
+                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :jvm-opts    ["-Djava.awt.headless=true"]
+         :main-opts   ["-m" "cognitect.test-runner"]}}}
