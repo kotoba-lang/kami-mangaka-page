@@ -17,7 +17,7 @@
             [kami.mangaka.text :as t])
   (:import [java.awt Color Font BasicStroke RenderingHints GraphicsEnvironment
                      RadialGradientPaint GradientPaint]
-           [java.awt.geom RoundRectangle2D$Double Point2D$Float]
+           [java.awt.geom RoundRectangle2D$Double Point2D$Float Path2D$Double]
            [java.awt.image BufferedImage]
            [javax.imageio ImageIO]
            [java.io File]))
@@ -52,6 +52,41 @@
         (get gn-templates n) (get gn-templates n)
         :else (grid-template n)))
 
+;; --- komawari force-line tilt (ADR-2607051500, ported from ai-gftd-mangaka's
+;; mangaka.layout.komawari — same design, this ecosystem's Java2D pixel space
+;; instead of that one's normalized-EDN datom space) ---------------------------
+;; A panel may opt into a dynamic diagonal border by carrying :tilt/:intensity/
+;; :vector (mirroring komawari's :beat/* keys). Purely additive: a panel with
+;; none of these renders exactly as before (axis-aligned rect, unchanged pixel
+;; output) — see page_test.clj's pre-existing layout/compose assertions.
+
+(def phi 1.618033988749895)
+
+(def ^:private impact-tilt-max
+  "The 1:φ rectangle's own diagonal angle (~31.7°) — same bound as
+  mangaka.layout.komawari/impact-tilt-max, so both ecosystems agree on how
+  steep a panel border is allowed to read."
+  (Math/toDegrees (Math/atan (/ 1.0 phi))))
+(def ^:private tension-tilt-max 10.0)
+
+(defn komawari-tilt
+  "An action-line angle (degrees, any range) + :calm/:tension/:impact →
+  a signed shear angle within a legible bound, or nil for :calm. Identical
+  folding/clamping to mangaka.layout.komawari/tilt-for."
+  [vector-deg intensity]
+  (when (and vector-deg (not= intensity :calm))
+    (let [max-t (if (= intensity :impact) impact-tilt-max tension-tilt-max)
+          folded (- (mod (+ vector-deg 90) 180) 90)]
+      (double (max (- max-t) (min max-t folded))))))
+
+(defn- row-tilt
+  "The shared tilt for a row of panels: the first :impact panel's tilt, else
+  the first :tension panel's, else nil — a row reads as ONE force-line."
+  [row]
+  (let [pick (or (first (filter #(= :impact (:intensity %)) row))
+                 (first (filter #(= :tension (:intensity %)) row)))]
+    (when pick (komawari-tilt (:vector pick) (:intensity pick)))))
+
 ;; --- ネーム-driven layout: vary panel size by the storyboard's intent --------
 ;; A uniform grid reads flat. Real pages breathe: hero bands, split rows, and
 ;; full-bleed splashes. We derive that from each panel's :size + the page layout,
@@ -81,17 +116,20 @@
           (recur (rest ps) (conj rows [a])))))))
 
 (defn layout-page
-  "→ {:bleed bool :pairs [[panel [x y w h]] ...]} in page-percent units, derived
-  from the page :layout + each panel's :size."
+  "→ {:bleed bool :pairs [[panel [x y w h] tilt] ...]} in page-percent units,
+  derived from the page :layout + each panel's :size. `tilt` (nil unless a
+  panel opts into :intensity/:vector) is the row's shared komawari force-line
+  angle — see `komawari-tilt` — nil for every panel unless a caller supplies
+  those keys, so pre-existing callers see byte-identical `pairs` rects."
   [page]
   (let [ps (:panels page) n (count ps)
         lay (str/lower-case (str (:layout page)))]
     (cond
       (or (<= n 1) (re-find #"splash|full|spread" lay))
-      {:bleed true :pairs (mapv vector ps [[0 0 100 100]])}
+      {:bleed true :pairs (mapv #(conj % nil) (mapv vector ps [[0 0 100 100]]))}
 
       (re-find #"grid" lay)
-      {:bleed false :pairs (mapv vector ps (template-for n))}
+      {:bleed false :pairs (mapv #(conj % nil) (mapv vector ps (template-for n)))}
 
       :else
       (let [rows    (rows-of ps)
@@ -99,9 +137,10 @@
             total   (reduce + weights)
             pairs   (volatile! []) y (volatile! 0.0)]
         (doseq [[row w] (map vector rows weights)]
-          (let [h (* 100.0 (/ w total)) k (count row) cw (/ 100.0 k)]
+          (let [h (* 100.0 (/ w total)) k (count row) cw (/ 100.0 k)
+                tilt (row-tilt row)]
             (doseq [[i p] (map-indexed vector row)]
-              (vswap! pairs conj [p [(* i cw) @y cw h]]))
+              (vswap! pairs conj [p [(* i cw) @y cw h] tilt]))
             (vswap! y + h)))
         {:bleed false :pairs @pairs}))))
 
@@ -226,10 +265,30 @@
     (.setRenderingHint RenderingHints/KEY_INTERPOLATION RenderingHints/VALUE_INTERPOLATION_BILINEAR)
     (.setRenderingHint RenderingHints/KEY_TEXT_ANTIALIASING RenderingHints/VALUE_TEXT_ANTIALIAS_ON)))
 
-(defn- draw-cover [g ^BufferedImage img x y w h]
+(defn- shear-polygon
+  "[x y w h] + tilt degrees → a Path2D parallelogram shifting the TOP edge by
+  dx = h·tan(tilt) — the same shear model as
+  mangaka.layout.komawari/shear-polygon (ai-gftd-mangaka), here in Java2D
+  pixel space instead of normalized page-space."
+  ^Path2D$Double [x y w h tilt-deg]
+  (let [dx (* h (Math/tan (Math/toRadians tilt-deg)))]
+    (doto (Path2D$Double.)
+      (.moveTo (+ x dx) y)
+      (.lineTo (+ x w dx) y)
+      (.lineTo (+ x w) (+ y h))
+      (.lineTo x (+ y h))
+      (.closePath))))
+
+(defn- draw-cover
+  "Draws `img` covering [x y w h]. An optional komawari `tilt` (degrees) clips
+  to the sheared parallelogram instead of the axis-aligned rect — nil/absent
+  renders identically to before."
+  [g ^BufferedImage img x y w h & [tilt]]
   (let [g2 (.create g)]
     (try
-      (.setClip g2 (int x) (int y) (int w) (int h))
+      (if tilt
+        (.setClip g2 (shear-polygon x y w h tilt))
+        (.setClip g2 (int x) (int y) (int w) (int h)))
       (let [iw (.getWidth img) ih (.getHeight img)
             s (max (/ (double w) iw) (/ (double h) ih))
             sw (* iw s) sh (* ih s)
@@ -237,11 +296,10 @@
         (.drawImage g2 img (int dx) (int dy) (int sw) (int sh) nil))
       (finally (.dispose g2)))))
 
-(defn- placeholder [g x y w h id]
-  (doto g (.setColor (Color. 233 227 207))
-          (.fillRect (int x) (int y) (int w) (int h))
-          (.setColor (Color. 150 150 140))
-          (.setFont (font Font/PLAIN 22)))
+(defn- placeholder [g x y w h id & [tilt]]
+  (.setColor g (Color. 233 227 207))
+  (if tilt (.fill g (shear-polygon x y w h tilt)) (.fillRect g (int x) (int y) (int w) (int h)))
+  (doto g (.setColor (Color. 150 150 140)) (.setFont (font Font/PLAIN 22)))
   (.drawString g (str id) (int (+ x 14)) (int (+ y 30))))
 
 (defn- caption-box
@@ -337,20 +395,25 @@
         cx0 m cy0 m cw (- PAGE-W (* 2 m)) ch (- PAGE-H (* 2 m))]
     (aa! g)
     (.setColor g (Color. 22 20 18)) (.fillRect g 0 0 PAGE-W PAGE-H) ; ink page base = crisp gutters
-    (doseq [[idx [panel [px py pw ph]]] (map-indexed vector pairs)]
+    (doseq [[idx [panel [px py pw ph] tilt]] (map-indexed vector pairs)]
       (let [x (+ cx0 (* cw (/ px 100.0)) (/ gut 2.0))
             y (+ cy0 (* ch (/ py 100.0)) (/ gut 2.0))
             w (- (* cw (/ pw 100.0)) gut)
             h (- (* ch (/ ph 100.0)) gut)
             f (img-of (:id panel))]
         (if (and f (.exists ^File f))
-          (draw-cover g (ImageIO/read ^File f) x y w h)
-          (placeholder g x y w h (:id panel)))
+          (draw-cover g (ImageIO/read ^File f) x y w h tilt)
+          (placeholder g x y w h (:id panel) tilt))
         ;; 背景トーン (kami.mangaka.expression :tone) — 画像の上, フレーム/文字の下
+        ;; (rect-clipped even under a komawari tilt — a sheared tone overlay is
+        ;; a future refinement, not needed to demonstrate the force-line frame)
         (tone-bg! g (:tone panel) x y w h)
-        ;; confident black frame (heavier on a bleed splash)
-        (doto g (.setColor Color/BLACK) (.setStroke (BasicStroke. (float (if bleed 10 5))))
-                (.drawRect (int x) (int y) (int w) (int h)))
+        ;; confident black frame (heavier on a bleed splash) — a komawari force-line
+        ;; row draws the sheared parallelogram, so the frame itself carries the angle
+        (.setColor g Color/BLACK) (.setStroke g (BasicStroke. (float (if bleed 10 5))))
+        (if tilt
+          (.draw g (shear-polygon x y w h tilt))
+          (.drawRect g (int x) (int y) (int w) (int h)))
         ;; text layer (shared, locale-keyed): nameplate + chatter + caption + bubbles + SFX
         (let [els     (t/panel->elements panel)
               narr-el (some #(when (= :narration (:kind %)) %) els)

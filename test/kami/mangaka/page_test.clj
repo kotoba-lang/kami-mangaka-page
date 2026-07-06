@@ -34,6 +34,37 @@
       (is (= (nth ys 0) (nth ys 1)))
       (is (> (nth ys 2) (nth ys 0))))))
 
+(deftest layout-page-komawari-tilt-is-additive
+  (testing "no panel opts into :intensity/:vector → every tilt is nil (unchanged output)"
+    (let [{:keys [pairs]} (page/layout-page
+                           {:layout "vertical"
+                            :panels [{:id "a" :size "narrow"} {:id "b" :size "narrow"}
+                                     {:id "c" :size "wide"}]})]
+      (is (every? nil? (map #(nth % 2) pairs)))))
+  (testing "an :impact panel shares its tilt with the whole row (force-line, ADR-2607051500)"
+    (let [{:keys [pairs]} (page/layout-page
+                           {:layout "vertical"
+                            :panels [{:id "a" :size "narrow" :intensity :impact :vector 20}
+                                     {:id "b" :size "narrow"}]})
+          tilts (map #(nth % 2) pairs)]
+      (is (apply = tilts) "both panels in the row share one tilt")
+      (is (some? (first tilts)))))
+  (testing "tilt is clamped to the 1:φ diagonal for :impact, and never fires for :calm"
+    (is (nil? (page/komawari-tilt 45 :calm)))
+    (is (<= (Math/abs (page/komawari-tilt 89 :impact)) 32.0))))
+
+(deftest compose-page!-with-force-line-tilt
+  (testing "a tilted row bakes without error (sheared clip/frame code path)"
+    (let [out (str (System/getProperty "java.io.tmpdir") "/mangaka-komawari-tilt.png")]
+      (io/delete-file out true)
+      (is (= out (page/compose-page!
+                  {:layout "vertical"
+                   :panels [{:id "a" :size "narrow" :intensity :impact :vector 25
+                             :dialogue [{:text "ZBAAAN!!"}]}
+                            {:id "b" :size "narrow"}]}
+                  (constantly nil) out)))
+      (is (.exists (io/file out))))))
+
 (deftest compose-page!-multilingual-bake
   (testing "bake consumes the shared MangaText layer + renders the chosen locale"
     (let [page {:layout "splash"
