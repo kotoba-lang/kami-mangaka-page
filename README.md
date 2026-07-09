@@ -38,6 +38,39 @@ Rust workspace (PR #82).
 A work supplies `page` maps from its own storyboard and a panel-id→File resolver;
 `kami-app-sip-clj`'s `sip.page` is the thin facade that wires `sip.storyboard`.
 
+## effectLines (効果線) & gaze (視線誘導)
+
+Panels may carry the `ai.gftd.mangaka` page-lexicon fields `:effectLines` and
+`:gaze`. Both use the **panel-local 0-1000 coordinate space** (both axes,
+independent of the panel's pixel size — `{:centerX 480 :centerY 450}` = 48%
+across / 45% down the panel rect).
+
+```clojure
+{:id "p1" :size "wide"
+ ;; 効果線 — baked into the print image, clipped to the panel.
+ ;; Z-order per the lexicon: panel art → tones → effectLines → SFX → bubbles.
+ :effectLines [{:kind "focus" :centerX 480 :centerY 450 :density 44 :coverage 85}]
+ ;; 視線誘導 — review-only metadata, never part of print output.
+ :gaze {:entryX 850 :entryY 150 :focusX 480 :focusY 450
+        :exitX 200 :exitY 700 :impression "dread"}}
+```
+
+- `:kind` — `focus`/`explosion` (radial black lines from the border toward the
+  centre, leaving an inner clear radius derived from `:coverage`; `explosion`
+  adds deterministic jitter + an irregular inner radius), `flash`
+  (lighter-stroke radial burst), `speed` (parallel horizontal lines; optional
+  `:direction` degrees). `:density` ≈ line count; unknown kinds are ignored.
+- `:gaze` renders as a dashed red entry→focus→exit curve with an arrowhead,
+  focus ring, and the `:impression` label — **only** when composing with the
+  opt-in flag:
+
+```clojure
+(page/compose-page! page img-of "review.png" :gaze-overlay? true)
+```
+
+Without `:gaze-overlay? true` the output is byte-identical whether or not
+`:gaze` is present.
+
 ## Known issue: `kami-mangaka-text-clj` dependency not yet split out
 
 `deps.edn` depends on the shared multilingual lettering layer via
