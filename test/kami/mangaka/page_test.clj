@@ -1,7 +1,16 @@
 (ns kami.mangaka.page-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
-            [kami.mangaka.page :as page]))
+            [kami.mangaka.page :as page])
+  (:import [javax.imageio ImageIO]))
+
+(defn- bake-bytes
+  "Compose `pg` to a temp PNG named `nm` (with `opts` kv-args) → its bytes."
+  [pg nm & opts]
+  (let [out (str (System/getProperty "java.io.tmpdir") "/" nm)]
+    (io/delete-file out true)
+    (apply page/compose-page! pg (constantly nil) out opts)
+    (java.nio.file.Files/readAllBytes (.toPath (io/file out)))))
 
 (deftest template-for-test
   (is (= [] (page/template-for 0)))
@@ -96,6 +105,80 @@
                                      (constantly nil) out)))
       (is (.exists (io/file out)))
       (is (pos? (.length (io/file out)))))))
+
+(deftest compose-page!-effect-lines-bake
+  (testing "every effectLines kind bakes without error (focus/explosion/flash/speed)"
+    (let [panels [{:id "p0" :size "half"
+                   :effectLines [{:kind "focus" :centerX 480 :centerY 450 :density 44 :coverage 85}]}
+                  {:id "p1" :size "half"
+                   :effectLines [{:kind "explosion" :centerX 500 :centerY 500 :density 40 :coverage 80}]}
+                  {:id "p2" :size "half"
+                   :effectLines [{:kind "flash" :centerX 500 :centerY 350 :density 62 :coverage 85}]}
+                  {:id "p3" :size "half"
+                   :effectLines [{:kind "speed" :direction 0 :density 30}]}]
+          out (str (System/getProperty "java.io.tmpdir") "/mangaka-effect-lines.png")]
+      (io/delete-file out true)
+      (is (= out (page/compose-page! {:layout "grid" :panels panels} (constantly nil) out)))
+      (is (.exists (io/file out)))
+      (is (pos? (.length (io/file out)))))))
+
+(deftest compose-page!-focus-lines-pixels
+  (testing "focus lines darken toward the panel border, leave the coverage-cleared centre clean"
+    (let [out (str (System/getProperty "java.io.tmpdir") "/mangaka-focus-pixels.png")
+          _   (io/delete-file out true)
+          _   (page/compose-page!
+               {:layout "splash"
+                :panels [{:id "p" :size "full-page"
+                          :effectLines [{:kind "focus" :centerX 500 :centerY 500
+                                         :density 60 :coverage 85}]}]}
+               (constantly nil) out)
+          img (ImageIO/read (io/file out))
+          dark? (fn [rgb]
+                  (let [r (bit-and (bit-shift-right rgb 16) 0xFF)
+                        g (bit-and (bit-shift-right rgb 8) 0xFF)
+                        b (bit-and rgb 0xFF)]
+                    (< (/ (+ r g b) 3.0) 110)))
+          cx (quot (.getWidth img) 2) cy (quot (.getHeight img) 2)
+          count-dark (fn [x0 x1 y0 y1]
+                       (count (filter dark? (for [xx (range x0 x1) yy (range y0 y1)]
+                                              (.getRGB img xx yy)))))
+          centre (count-dark (- cx 50) (+ cx 50) (- cy 50) (+ cy 50))
+          edge   (count-dark 60 260 (- cy 50) (+ cy 50))]
+      (is (zero? centre) "the coverage-derived inner radius stays clear of lines")
+      (is (> edge 20) "radial lines are present near the panel border"))))
+
+(deftest compose-page!-effect-lines-nil-guard
+  (testing "a page with nil/empty effectLines renders byte-identically to one without the key"
+    (let [base   {:layout "grid" :panels [{:id "a" :size "half"} {:id "b" :size "half"}]}
+          plain  (bake-bytes base "mk-fx-base.png")
+          w-nil  (bake-bytes (assoc-in base [:panels 0 :effectLines] nil) "mk-fx-nil.png")
+          w-empt (bake-bytes (assoc-in base [:panels 0 :effectLines] []) "mk-fx-empty.png")]
+      (is (= (seq plain) (seq w-nil) (seq w-empt))))))
+
+(deftest compose-page!-gaze-overlay-opt-in
+  (testing "gaze is a review overlay: absent from output unless :gaze-overlay? true"
+    (let [gaze {:entryX 850 :entryY 150 :focusX 480 :focusY 450
+                :exitX 200 :exitY 700 :impression "dread"}
+          pg   {:layout "splash"
+                :panels [{:id "p" :size "full-page" :gaze gaze}]}
+          no-key  (bake-bytes (update-in pg [:panels 0] dissoc :gaze) "mk-gaze-nokey.png")
+          plain   (bake-bytes pg "mk-gaze-plain.png")
+          overlay (bake-bytes pg "mk-gaze-overlay.png" :gaze-overlay? true)]
+      (is (= (seq no-key) (seq plain)) "without the option, gaze data changes nothing")
+      (is (not= (seq plain) (seq overlay)) "with :gaze-overlay? true the overlay is drawn")
+      (testing "the overlay actually draws red strokes near the focus point"
+        (let [img (ImageIO/read (io/file (str (System/getProperty "java.io.tmpdir")
+                                              "/mk-gaze-overlay.png")))
+              red? (fn [rgb]
+                     (let [r (bit-and (bit-shift-right rgb 16) 0xFF)
+                           g (bit-and (bit-shift-right rgb 8) 0xFF)
+                           b (bit-and rgb 0xFF)]
+                       (and (> r 170) (< g 110) (< b 110))))
+              ;; focus (480,450)/1000 of the full-bleed B5 page
+              fx (int (* (.getWidth img) 0.48)) fy (int (* (.getHeight img) 0.45))]
+          (is (some red? (for [xx (range (- fx 100) (+ fx 100))
+                               yy (range (- fy 100) (+ fy 100))]
+                           (.getRGB img xx yy)))))))))
 
 (deftest compose-page!-writes-a-png
   (testing "headless Java2D composes a page (placeholders, no source images)"

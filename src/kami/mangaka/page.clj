@@ -374,6 +374,123 @@
           (.drawString g2 ^String (str text) sx sy))
         (finally (.dispose g2))))))
 
+;; --- 効果線 (effectLines) + 視線誘導 (gaze) — ai.gftd.mangaka page lexicon ----
+;; Both fields live on the panel in the lexicon's panel-local 0-1000 coordinate
+;; space (both axes, independent of the panel's pixel size): {:centerX 480
+;; :centerY 450} means 48% across / 45% down the panel rect. Z-order per the
+;; lexicon: panel art → tones → effectLines → SFX → bubbles.
+
+(defn- fx->px
+  "Panel-local 0-1000 coordinate `v` → a pixel position along [origin origin+extent]
+  (nil → 500 = panel centre)."
+  ^double [v origin extent]
+  (+ (double origin) (* (double extent) (/ (double (or v 500)) 1000.0))))
+
+(defn- draw-effect-lines!
+  "Draw 効果線 (effect lines) over the panel rect [x y w h] — the lexicon panel
+  field `effectLines`: [{:kind :centerX :centerY :density :coverage}…] in
+  panel-local 0-1000 coords. Kinds:
+    :focus / :explosion — radial black lines from the panel border toward the
+      centre, leaving an inner clear radius derived from :coverage (85 → lines
+      cover the outer 85% of the radius); :explosion adds per-line angle jitter
+      + an irregular inner radius (seeded, so bakes stay deterministic).
+    :flash — lighter-stroke radial burst (alternating inner reach = フラッシュ).
+    :speed — parallel horizontal lines (optional :direction degrees rotates them).
+  :density ≈ line count. Unknown kinds are ignored. Clipped to the panel rect;
+  drawn after the tone layer and before SFX/bubbles (lexicon z-order)."
+  [g lines x y w h]
+  (doseq [{:keys [kind centerX centerY density coverage direction]} lines]
+    (let [g2 (.create g)]
+      (try
+        (.setClip g2 (int x) (int y) (int w) (int h))
+        (let [kind (keyword (str/lower-case (name (or kind :focus))))
+              n    (int (min 240 (max 4 (long (if (number? density) density 32)))))
+              cov  (double (if (number? coverage) coverage 70))
+              cx   (fx->px centerX x w)
+              cy   (fx->px centerY y h)
+              ;; far enough to reach the panel's farthest corner from the centre
+              rmax (Math/hypot (max (- cx x) (- (+ x w) cx))
+                               (max (- cy y) (- (+ y h) cy)))
+              r0   (* rmax (max 0.02 (- 1.0 (/ cov 100.0))))
+              rnd  (java.util.Random. (long (+ n (* 31 (long cx)) (* 131 (long cy)))))]
+          (case kind
+            (:focus :explosion)
+            (let [expl? (= kind :explosion)]
+              (.setColor g2 (Color. 0 0 0 (if expl? 225 195)))
+              (doseq [i (range n)]
+                (let [base (* 2.0 Math/PI (/ (double i) n))
+                      a    (if expl? (+ base (* 0.12 (.nextGaussian rnd))) base)
+                      ri   (if expl? (* r0 (+ 0.55 (* 0.9 (.nextDouble rnd)))) r0)]
+                  (.setStroke g2 (BasicStroke. (float (if expl?
+                                                        (+ 1.5 (* 2.5 (.nextDouble rnd)))
+                                                        2.0))))
+                  (.drawLine g2 (int (+ cx (* ri (Math/cos a)))) (int (+ cy (* ri (Math/sin a))))
+                             (int (+ cx (* rmax (Math/cos a)))) (int (+ cy (* rmax (Math/sin a))))))))
+            :flash
+            (do (.setColor g2 (Color. 0 0 0 130))
+                (.setStroke g2 (BasicStroke. 1.2))
+                (doseq [i (range n)]
+                  (let [a  (* 2.0 Math/PI (/ (double i) n))
+                        ri (* r0 (if (even? i) 1.0 1.4))]
+                    (.drawLine g2 (int (+ cx (* ri (Math/cos a)))) (int (+ cy (* ri (Math/sin a))))
+                               (int (+ cx (* rmax (Math/cos a)))) (int (+ cy (* rmax (Math/sin a))))))))
+            :speed
+            (let [ang  (Math/toRadians (double (if (number? direction) direction 0)))
+                  mx   (+ x (/ w 2.0)) my (+ y (/ h 2.0))
+                  span (Math/hypot w h)
+                  x0   (- mx (/ span 2.0))]
+              (.rotate g2 ang mx my)
+              (.setColor g2 (Color. 0 0 0 175))
+              (doseq [i (range n)]
+                (let [yy (+ y (* h (/ (+ i 0.5) (double n))) (* 2.0 (.nextGaussian rnd)))
+                      st (+ x0 (* span 0.35 (.nextDouble rnd)))
+                      en (+ st (* span (+ 0.35 (* 0.45 (.nextDouble rnd)))))]
+                  (.setStroke g2 (BasicStroke. (float (+ 0.8 (* 1.6 (.nextDouble rnd))))))
+                  (.drawLine g2 (int st) (int yy) (int en) (int yy)))))
+            nil))
+        (finally (.dispose g2))))))
+
+(defn- draw-gaze-overlay!
+  "視線誘導 (gaze guidance) REVIEW overlay — NOT print content: only drawn when
+  `compose-page!` is called with :gaze-overlay? true. `gaze` is the lexicon
+  panel field {:entryX :entryY :focusX :focusY :exitX :exitY :impression} in
+  panel-local 0-1000 coords: a dashed red entry→focus→exit curve (a quadratic
+  passing through the focus point) with an entry dot, a focus ring, an
+  arrowhead at the exit, and the :impression label near the entry."
+  [g gaze x y w h]
+  (when (map? gaze)
+    (let [g2 (.create g)]
+      (try
+        (.setClip g2 (int x) (int y) (int w) (int h))
+        (let [ex (fx->px (:entryX gaze) x w) ey (fx->px (:entryY gaze) y h)
+              fx (fx->px (:focusX gaze) x w) fy (fx->px (:focusY gaze) y h)
+              gx (fx->px (:exitX gaze) x w)  gy (fx->px (:exitY gaze) y h)
+              ;; control point so the quadratic passes through focus at t=0.5
+              qx (- (* 2.0 fx) (/ (+ ex gx) 2.0))
+              qy (- (* 2.0 fy) (/ (+ ey gy) 2.0))
+              red (Color. 220 30 30 235)]
+          (.setColor g2 red)
+          (.setStroke g2 (BasicStroke. 3.0 BasicStroke/CAP_ROUND BasicStroke/JOIN_ROUND
+                                       10.0 (float-array [12.0 9.0]) 0.0))
+          (.draw g2 (doto (Path2D$Double.) (.moveTo ex ey) (.quadTo qx qy gx gy)))
+          (.fillOval g2 (int (- ex 5)) (int (- ey 5)) 10 10)          ; entry dot
+          (.setStroke g2 (BasicStroke. 2.5))
+          (.drawOval g2 (int (- fx 11)) (int (- fy 11)) 22 22)        ; focus ring
+          ;; arrowhead at the exit along the curve's end tangent (exit − control)
+          (let [vx (- gx qx) vy (- gy qy)
+                m  (max 1.0E-6 (Math/hypot vx vy))
+                ux (/ vx m) uy (/ vy m) len 18.0
+                rot (fn [th] [(- (* (- ux) (Math/cos th)) (* (- uy) (Math/sin th)))
+                              (+ (* (- ux) (Math/sin th)) (* (- uy) (Math/cos th)))])
+                [lx ly] (rot 0.45) [rx ry] (rot -0.45)]
+            (.setStroke g2 (BasicStroke. 3.0 BasicStroke/CAP_ROUND BasicStroke/JOIN_ROUND))
+            (.drawLine g2 (int gx) (int gy) (int (+ gx (* len lx))) (int (+ gy (* len ly))))
+            (.drawLine g2 (int gx) (int gy) (int (+ gx (* len rx))) (int (+ gy (* len ry)))))
+          (when-let [imp (:impression gaze)]
+            (.setFont g2 (font Font/PLAIN 16))
+            (.drawString g2 ^String (str imp) (int (+ ex 8)) (int (- ey 8)))))
+        (finally (.dispose g2))))))
+
 ;; --- page composition --------------------------------------------------------
 
 (def PAGE-W 1075) (def PAGE-H 1518)   ; B5 @ ~150dpi
@@ -384,8 +501,14 @@
   `img-of` maps a panel-id → image File (or nil → placeholder). The text layer
   (narration caption + dialogue bubbles + SFX) is derived from each panel via
   kami.mangaka.text and rendered in `:locale` (default :ja) — the image is the
-  same regardless of language."
-  [page img-of out & {:keys [locale] :or {locale :ja}}]
+  same regardless of language.
+
+  A panel may carry the lexicon fields `:effectLines` (効果線, baked into the
+  print image between the tone layer and the lettering) and `:gaze` (視線誘導,
+  review-only: drawn as a dashed red overlay ONLY when called with
+  `:gaze-overlay? true` — never part of print output). Both use the panel-local
+  0-1000 coordinate space (see `draw-effect-lines!` / `draw-gaze-overlay!`)."
+  [page img-of out & {:keys [locale gaze-overlay?] :or {locale :ja}}]
   (let [{:keys [bleed pairs]} (layout-page page)
         canvas (BufferedImage. PAGE-W PAGE-H BufferedImage/TYPE_INT_RGB)
         g (.createGraphics canvas)
@@ -408,6 +531,9 @@
         ;; (rect-clipped even under a komawari tilt — a sheared tone overlay is
         ;; a future refinement, not needed to demonstrate the force-line frame)
         (tone-bg! g (:tone panel) x y w h)
+        ;; 効果線 (lexicon z-order: panel art → tones → effectLines → SFX → bubbles)
+        (when-let [fx (seq (or (:effectLines panel) (:effect-lines panel)))]
+          (draw-effect-lines! g fx x y w h))
         ;; confident black frame (heavier on a bleed splash) — a komawari force-line
         ;; row draws the sheared parallelogram, so the frame itself carries the angle
         (.setColor g Color/BLACK) (.setStroke g (BasicStroke. (float (if bleed 10 5))))
@@ -436,7 +562,10 @@
                                  {:weight (:weight d) :scale (:scale d) :shape (:bubble d)})]
                   (recur (rest ds) (or nt (+ top 96)))))))
           (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s)))
-          (doseq [np nps] (nameplate! g (t/localize (:text np) locale) x y w h)))))
+          (doseq [np nps] (nameplate! g (t/localize (:text np) locale) x y w h)))
+        ;; 視線誘導 review overlay — opt-in only, on top of everything in the panel
+        (when gaze-overlay?
+          (draw-gaze-overlay! g (:gaze panel) x y w h))))
     (.dispose g)
     (io/make-parents out)
     (ImageIO/write canvas "png" (File. ^String out))
