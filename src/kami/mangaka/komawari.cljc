@@ -122,11 +122,17 @@
 
 ;; ─────────────────────────── force-line tilt ───────────────────────────────
 
+(def ^:private radians->degrees
+  "Math/toDegrees is JVM-only (no JS Math.toDegrees) -- this namespace must
+  stay portable to cljs/nbb, so multiply by the constant instead."
+  (/ 180.0 Math/PI))
+(def ^:private degrees->radians (/ Math/PI 180.0))
+
 (def ^:private impact-tilt-max
   "The steepest a panel border is allowed to read: the diagonal angle of a
   1:φ rectangle itself (~31.7°) — the same golden-ratio geometry driving the
   proportional weighting above, rather than an arbitrary degree count."
-  (Math/toDegrees (Math/atan (/ 1.0 phi))))
+  (* (Math/atan (/ 1.0 phi)) radians->degrees))
 (def ^:private tension-tilt-max 10.0)
 
 (defn- clamp [v lo hi] (max lo (min hi v)))
@@ -175,7 +181,7 @@
   Every panel in a row shares the same h and tilt, so adjoining internal
   gutters stay congruent — no gaps or overlaps between neighbors."
   [[x y w h] tilt-deg]
-  (let [dx (* h (Math/tan (Math/toRadians tilt-deg)))]
+  (let [dx (* h (Math/tan (* tilt-deg degrees->radians)))]
     [[(+ x dx) y] [(+ x w dx) y] [(+ x w) (+ y h)] [x (+ y h)]]))
 
 ;; ──────────────────────────────── propose ──────────────────────────────────
