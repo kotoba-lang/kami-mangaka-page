@@ -1,4 +1,4 @@
-# kami-mangaka-page-clj
+# kami-mangaka-page
 
 Work-agnostic **graphic-novel PAGE composition** (komawari コマ割り + DTP) — the
 Tier-1 `mangaka` platform page layer (ADR-2606282100).
@@ -38,6 +38,34 @@ Rust workspace (PR #82).
 A work supplies `page` maps from its own storyboard and a panel-id→File resolver;
 `kami-app-sip-clj`'s `sip.page` is the thin facade that wires `sip.storyboard`.
 
+## `kami.mangaka.komawari` — golden-ratio panel geometry (ADR-2607141700)
+
+A second, independent geometry engine lives alongside `page.clj`'s template/tilt
+API above: `kami.mangaka.komawari`, a pure `.cljc` namespace with no Java2D/host
+dependency. It proposes normalized `[0,1]` panel rects from an authored beat
+sequence — proportional golden-ratio row/column weighting, force-line row-shear,
+named `:toriyama`/`:togashi` artist styles, panel-in-panel frame-break inset, and
+a deterministic overlap/bounds/tilt governor — rather than picking from a fixed
+N-panel template.
+
+```clojure
+(require '[kami.mangaka.komawari :as komawari])
+
+(komawari/propose-page-layout
+  [[{:beat/weight :large :panel/id :hero} {:beat/weight :small :panel/id :bg}]]
+  {:style :toriyama})
+;; => [{:panel/id :hero :panel/rect [...]}
+;;     {:panel/id :bg   :panel/rect [...]}]
+
+(komawari/validate-layout panels)  ; => {:ok? bool :issues [...] :errors :warnings}
+```
+
+Ported from `gftdcojp/ai-gftd-mangaka`'s `mangaka.layout.komawari`
+(ADR-2607051520/2607051530, developed and proven there against real Ghost
+Hacker Arc0-1 panels) so it has one shared implementation instead of two
+independent copies — `ai-gftd-mangaka` and `app-aozora` are expected to depend
+on this namespace going forward rather than their own embedded copy.
+
 ## effectLines (効果線) & gaze (視線誘導)
 
 Panels may carry the `ai.gftd.mangaka` page-lexicon fields `:effectLines` and
@@ -71,33 +99,13 @@ across / 45% down the panel rect).
 Without `:gaze-overlay? true` the output is byte-identical whether or not
 `:gaze` is present.
 
-## Known issue: `kami-mangaka-text-clj` dependency not yet split out
-
-`deps.edn` depends on the shared multilingual lettering layer via
-`{:local/root "../kami-mangaka-text-clj"}`. In the `kami-engine` monorepo that
-sibling directory sat next to `kami-mangaka-page-clj/`; in this standalone repo
-there is no sibling checkout, so `clojure -M:test` currently fails at classpath
-resolution:
-
-```
-Error building classpath. Local lib gftd/kami-mangaka-text-clj not found: /private/tmp/kami-mangaka-text-clj
-```
-
-`kami-mangaka-text-clj` is still living inside `kotoba-lang/kami-engine` (not yet
-split into its own repo) as of this migration. To run tests locally today,
-clone `kotoba-lang/kami-engine` alongside this repo and symlink/copy its
-`kami-mangaka-text-clj/` subtree to `../kami-mangaka-text-clj` relative to this
-repo's root, or check out `kami-engine` at a path such that
-`../kami-mangaka-text-clj` resolves correctly. Once `kami-mangaka-text-clj` gets
-its own standalone repo (mirroring this split), `deps.edn` should be updated to
-point at that repo via a `:git/url`+`:sha` (or `:local/root` pointing at a
-sibling clone) instead of the current monorepo-relative path.
-
 ## Test
 
 ```bash
-bb test     # templates / layout (splash·grid·ネーム rows) / headless compose-page!
+clojure -M:test   # templates / layout (splash·grid·ネーム rows) / komawari propose+validate / headless compose-page!
+clojure -M:lint   # clj-kondo, matches CI (.github/workflows/ci.yml)
 ```
 
-(See the "Known issue" section above — this currently fails to build its
-classpath until the `kami-mangaka-text-clj` dependency is resolved.)
+`kami-mangaka-text` (the shared multilingual lettering dependency) is its own
+standalone repo now (`:git/url`+`:sha` in `deps.edn`) — no sibling checkout or
+monorepo-relative path needed to build.
