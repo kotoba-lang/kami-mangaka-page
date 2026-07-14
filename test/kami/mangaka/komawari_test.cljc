@@ -1,0 +1,103 @@
+(ns kami.mangaka.komawari-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [kami.mangaka.komawari :as k]))
+
+(deftest golden-ratio-proportions
+  (testing "a :large beat reads ~φ:1 against a :small sibling in the same row"
+    (let [[p1 p2] (k/propose-page-layout [[{:beat/weight :large :panel/id 1}
+                                           {:beat/weight :small :panel/id 2}]])
+          w1 (nth (:panel/rect p1) 2) w2 (nth (:panel/rect p2) 2)]
+      (is (< 2.5 (/ w1 w2) 2.7) "large:small ≈ φ²:1")))
+  (testing "a lone beat fills the page (splash-equivalent full rect)"
+    (let [[p] (k/propose-page-layout [[{:beat/weight :splash :panel/id 1}]])]
+      (is (= [0.0 0.0 1.0 1.0] (mapv double (:panel/rect p))))
+      (is (true? (:panel/bleed p))))))
+
+(deftest reading-order-is-right-to-left
+  (testing "the first beat in a row renders rightmost (manga page-turn direction)"
+    (let [[right left] (k/propose-page-layout [[{:panel/id :r} {:panel/id :l}]])]
+      (is (> (first (:panel/rect right)) (first (:panel/rect left)))))))
+
+(deftest force-line-shears-the-whole-row-congruently
+  (testing "every panel in an :impact row gets the SAME tilt, and their shared
+            internal gutter stays congruent (no gap/overlap introduced by the shear)"
+    (let [[right left] (k/propose-page-layout
+                        [[{:beat/intensity :impact :beat/vector 20 :panel/id :r}
+                          {:panel/id :l}]])]
+      (is (= (:panel/tilt right) (:panel/tilt left)) "shared row tilt")
+      (is (some? (:panel/polygon right)))
+      (is (some? (:panel/polygon left)) "the tilt-less neighbor is still sheared to match the row")
+      (let [[rtl _ _ rbl] (:panel/polygon right)
+            [_ ltr lbr _] (:panel/polygon left)
+            top-gap (- (first rtl) (first ltr))
+            bottom-gap (- (first rbl) (first lbr))]
+        (is (< 0 top-gap) "no overlap at the top of the gutter")
+        (is (< 0 bottom-gap) "no overlap at the bottom of the gutter")
+        (is (< (Math/abs (- top-gap bottom-gap)) 1e-9)
+            "the gutter channel is parallel (constant width), not a wedge"))))
+  (testing "a :calm row never tilts, even with a :beat/vector present"
+    (let [[p] (k/propose-page-layout [[{:beat/vector 45 :panel/id 1}]])]
+      (is (nil? (:panel/tilt p)))
+      (is (nil? (:panel/polygon p))))))
+
+(deftest tilt-is-clamped-to-a-readable-bound
+  (testing "impact tilt never exceeds the 1:φ diagonal angle, regardless of input vector"
+    (is (= 15.0 (k/tilt-for 15 :impact)))
+    (is (<= (Math/abs (k/tilt-for 89 :impact)) 32.0))
+    (is (<= (Math/abs (k/tilt-for 175 :impact)) 32.0)))
+  (testing ":calm never tilts"
+    (is (nil? (k/tilt-for 45 :calm)))))
+
+(deftest validate-layout-catches-real-problems
+  (testing "clean output from the generator itself passes"
+    (is (:ok? (k/validate-layout
+               (k/propose-page-layout [[{:panel/id 1} {:panel/id 2}]
+                                        [{:beat/intensity :impact :beat/vector 10 :panel/id 3}]])))))
+  (testing "an excessive hand-authored tilt is rejected"
+    (let [report (k/validate-layout [{:panel/id 1 :panel/rect [0 0 1 0.9] :panel/tilt 60}])]
+      (is (false? (:ok? report)))
+      (is (some #(= :tilt-out-of-bounds (:code %)) (:issues report)))))
+  (testing "two overlapping panels are rejected"
+    (let [report (k/validate-layout [{:panel/id 1 :panel/rect [0.0 0.0 0.6 0.6]}
+                                      {:panel/id 2 :panel/rect [0.3 0.3 0.6 0.6]}])]
+      (is (false? (:ok? report)))
+      (is (some #(= :panel-overlap (:code %)) (:issues report)))))
+  (testing "a panel that runs off the page without :panel/bleed is rejected"
+    (let [report (k/validate-layout [{:panel/id 1 :panel/rect [0.8 0.0 0.5 0.3]}])]
+      (is (false? (:ok? report)))
+      (is (some #(= :panel-out-of-bounds (:code %)) (:issues report))))))
+
+(deftest style-gates-tilt
+  (testing ":toriyama (default) tilts an :impact row"
+    (let [[p] (k/propose-page-layout [[{:panel/id 1 :beat/intensity :impact :beat/vector 25}]])]
+      (is (= 25.0 (:panel/tilt p)))))
+  (testing ":togashi keeps panels rectilinear even under :impact — dynamism lives
+            elsewhere (frame-break), not in the panel border, per the HxH reference"
+    (let [[p] (k/propose-page-layout [[{:panel/id 1 :beat/intensity :impact :beat/vector 25}]]
+                                     {:style :togashi})]
+      (is (nil? (:panel/tilt p)))
+      (is (nil? (:panel/polygon p))))))
+
+(deftest togashi-frame-break-inset
+  (testing "an :beat/inset beat overlaps the row below it, and the governor
+            expects that specific overlap (tagged \"frame-break\") — only
+            under a :frame-break? style (:togashi); :toriyama ignores it"
+    (let [rows [[{:panel/id :hand :beat/weight :small :beat/inset true}]
+                [{:panel/id :crowd :beat/weight :large}]]
+          [hand crowd] (k/propose-page-layout rows {:style :togashi})]
+      (is (= ["frame-break"] (:panel/tags hand)))
+      (is (true? (:panel/bleed hand)))
+      (let [[_ hy _ hh] (:panel/rect hand)
+            [_ cy _ _]  (:panel/rect crowd)]
+        (is (> (+ hy hh) cy) "hand's bottom edge crosses into crowd's row"))
+      (is (:ok? (k/validate-layout (k/propose-page-layout rows {:style :togashi})))
+          "the deliberate frame-break overlap does not fail the governor"))
+    (let [[hand] (k/propose-page-layout
+                  [[{:panel/id :hand :beat/weight :small :beat/inset true}]
+                   [{:panel/id :crowd :beat/weight :large}]])]
+      (is (nil? (:panel/tags hand)) ":toriyama has :frame-break? false — :beat/inset is a no-op")))
+  (testing "an ordinary (non-inset) overlap between two panels is still rejected"
+    (let [report (k/validate-layout [{:panel/id 1 :panel/rect [0.0 0.0 0.6 0.6]}
+                                      {:panel/id 2 :panel/rect [0.3 0.3 0.6 0.6]}])]
+      (is (false? (:ok? report)))
+      (is (some #(= :panel-overlap (:code %)) (:issues report))))))
