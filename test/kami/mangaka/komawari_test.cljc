@@ -101,3 +101,77 @@
                                       {:panel/id 2 :panel/rect [0.3 0.3 0.6 0.6]}])]
       (is (false? (:ok? report)))
       (is (some #(= :panel-overlap (:code %)) (:issues report))))))
+
+(deftest urasawa-band-grid
+  (testing ":urasawa keeps panels rectilinear even under :impact — the drama is
+            authoring-side (repetition/page-turn), never the frame"
+    (let [[p] (k/propose-page-layout [[{:panel/id 1 :beat/intensity :impact :beat/vector 25}]]
+                                     {:style :urasawa})]
+      (is (nil? (:panel/tilt p)))
+      (is (nil? (:panel/polygon p)))))
+  (testing "size contrast is subdued: large:small reads √φ·√φ = φ, not φ²"
+    (let [[l s] (k/propose-page-layout [[{:beat/weight :large :panel/id 1}
+                                         {:beat/weight :small :panel/id 2}]]
+                                       {:style :urasawa})
+          ratio (/ (nth (:panel/rect l) 2) (nth (:panel/rect s) 2))]
+      (is (< 1.5 ratio 1.7) "≈ φ under :urasawa")
+      (is (< 2.5 (/ (nth (:panel/rect (first (k/propose-page-layout
+                                              [[{:beat/weight :large :panel/id 1}
+                                                {:beat/weight :small :panel/id 2}]]))) 2)
+                    (nth (:panel/rect (second (k/propose-page-layout
+                                               [[{:beat/weight :large :panel/id 1}
+                                                 {:beat/weight :small :panel/id 2}]]))) 2))
+             2.7) "default table unchanged ≈ φ²")))
+  (testing ":beat/inset and :beat/breakout are both no-ops under :urasawa"
+    (let [[p] (k/propose-page-layout [[{:panel/id 1 :beat/inset true :beat/breakout true}]]
+                                     {:style :urasawa})]
+      (is (nil? (:panel/tags p)))
+      (is (nil? (:panel/bleed p))))))
+
+(deftest inoue-character-bleed
+  (testing ":inoue keeps gutters rectilinear (diagonal energy lives inside the
+            panel, not the frame) but lets the figure cross the border"
+    (let [[p] (k/propose-page-layout
+               [[{:panel/id 1 :beat/intensity :impact :beat/vector 30 :beat/breakout true}]]
+               {:style :inoue})]
+      (is (nil? (:panel/tilt p)))
+      (is (= ["impact" "character-bleed"] (:panel/tags p)))
+      (is (true? (:panel/bleed p)))
+      (is (= 3 (:panel/z p)))))
+  (testing "a breakout panel still passes the governor (bleed widens bounds)"
+    (let [panels (k/propose-page-layout
+                  [[{:panel/id 1 :beat/breakout true}] [{:panel/id 2}]]
+                  {:style :inoue})]
+      (is (:ok? (k/validate-layout panels)))))
+  (testing ":beat/breakout is stripped-but-ignored under non-bleed styles"
+    (let [[p] (k/propose-page-layout [[{:panel/id 1 :beat/breakout true}]])]
+      (is (nil? (:beat/breakout p)))
+      (is (nil? (:panel/tags p))))))
+
+(deftest araki-steep-shear
+  (testing ":araki allows a steeper impact shear than the default φ bound"
+    (let [[p] (k/propose-page-layout [[{:panel/id 1 :beat/intensity :impact :beat/vector 40}]]
+                                     {:style :araki})]
+      (is (= 40.0 (:panel/tilt p)) "40° passes :araki's 45° cap")
+      (is (some? (:panel/polygon p))))
+    (is (= 45.0 (k/tilt-for 60 :impact (:araki k/styles))) "clamped at 45°")
+    (is (<= (Math/abs (k/tilt-for 40 :impact)) 32.0) "default cap still φ-bounded"))
+  (testing "the governor accepts the steep shear only under {:style :araki}
+            (3-tier page — a 40° shear of a full-page-height panel would
+            genuinely overflow even the bleed bound, and should)"
+    (let [panels (k/propose-page-layout
+                  [[{:panel/id 1 :beat/intensity :impact :beat/vector 40}]
+                   [{:panel/id 2}]
+                   [{:panel/id 3}]]
+                  {:style :araki})]
+      (is (:ok? (k/validate-layout panels {:style :araki})))
+      (is (false? (:ok? (k/validate-layout panels)))
+          "the same page fails the default φ bound")))
+  (testing ":araki combines frame-break AND character bleed"
+    (let [rows [[{:panel/id :cut-in :beat/weight :small :beat/inset true}]
+                [{:panel/id :pose :beat/weight :large :beat/breakout true}]]
+          [cut-in pose] (k/propose-page-layout rows {:style :araki})]
+      (is (= ["frame-break"] (:panel/tags cut-in)))
+      (is (= ["character-bleed"] (:panel/tags pose)))
+      (is (:ok? (k/validate-layout (k/propose-page-layout rows {:style :araki})
+                                   {:style :araki}))))))
