@@ -102,6 +102,31 @@
       (is (false? (:ok? report)))
       (is (some #(= :panel-overlap (:code %)) (:issues report))))))
 
+(deftest sheared-row-passes-its-own-governor
+  (testing "a multi-panel :impact row (whole-row force-line shear) validates:
+            the non-impact row-mate carries the row's shared 20° tilt (tagged
+            sheared-impact → capped by the ROW's intensity) and the congruent
+            bbox spill between row-mates is exempt from the overlap check —
+            the generator's own output always passes its own governor
+            (regression: ghosthacker arc0-1 climax pages, ADR-2607172230)"
+    (let [rows [[{:panel/id 1} {:panel/id 2}]
+                [{:panel/id 3 :beat/intensity :impact :beat/vector 20} {:panel/id 4}]
+                [{:panel/id 5}]]
+          panels (k/propose-page-layout rows)]
+      (is (= 20.0 (:panel/tilt (nth panels 2))))
+      (is (= 20.0 (:panel/tilt (nth panels 3))) "row-mate shares the row tilt")
+      (is (some #{"sheared-impact"} (:panel/tags (nth panels 3))))
+      (is (:ok? (k/validate-layout panels)))))
+  (testing "equal-tilt sheared panels on DIFFERENT rows that genuinely
+            overlap are still rejected (the exemption is same-y-band only)"
+    (let [report (k/validate-layout
+                  [{:panel/id 1 :panel/rect [0.0 0.0 0.6 0.4] :panel/tilt 20
+                    :panel/tags ["sheared-impact"] :panel/bleed true}
+                   {:panel/id 2 :panel/rect [0.1 0.25 0.6 0.4] :panel/tilt 20
+                    :panel/tags ["sheared-impact"] :panel/bleed true}])]
+      (is (false? (:ok? report)))
+      (is (some #(= :panel-overlap (:code %)) (:issues report))))))
+
 (deftest urasawa-band-grid
   (testing ":urasawa keeps panels rectilinear even under :impact — the drama is
             authoring-side (repetition/page-turn), never the frame"

@@ -269,6 +269,13 @@
       (mapcat
        (fn [row [y h]]
          (let [tilt (row-tilt row style)
+               ;; The row's shear inherits the intensity of the beat that set
+               ;; it (row-tilt picks :impact first) — every panel in the row
+               ;; is tagged with it so the governor caps the SHARED tilt by
+               ;; the row's own intensity, not each neighbor's missing tag.
+               shear-tag (when tilt
+                           (if (some #(= :impact (:beat/intensity %)) row)
+                             "sheared-impact" "sheared-tension"))
                frame-break-ok? (:frame-break? (style-opts style))
                bleed-ok? (:character-bleed? (style-opts style))]
            (map (fn [beat [x w]]
@@ -281,7 +288,8 @@
                         (assoc :panel/rect rect)
                         (cond->
                          tilt (-> (assoc :panel/tilt tilt :panel/polygon (shear-quad rect tilt))
-                                  (assoc :panel/bleed true))
+                                  (assoc :panel/bleed true)
+                                  (update :panel/tags (fnil conj []) shear-tag))
                          (= :impact (:beat/intensity beat)) (-> (assoc :panel/z 2)
                                                                  (update :panel/tags (fnil conj []) "impact"))
                          (= :splash (:beat/weight beat)) (assoc :panel/bleed true)
@@ -330,7 +338,15 @@
   order — within a same-y-band run, x must strictly decrease (RTL) as
   :panel/index increases. The 2-arity takes {:style k}: tilt bounds then
   come from that style's own caps (an :araki 45° impact shear passes under
-  {:style :araki} but still fails the default φ bound)."
+  {:style :araki} but still fails the default φ bound).
+
+  Sheared rows: a force-line row shares ONE tilt across every panel
+  (`row-tilt`), so its non-impact members carry the impact-level tilt too —
+  they are tagged \"sheared-impact\"/\"sheared-tension\" by the generator and
+  capped by the ROW's intensity. Two same-row sheared panels' bounding boxes
+  also overlap by construction (a parallelogram's bbox spills over the
+  gutter) even though the polygons never do, so that specific pair (both
+  sheared, equal tilt, same y-band) is exempt from the overlap check."
   ([panels] (validate-layout panels {}))
   ([panels {:keys [style]}]
   (let [panels (vec panels)
@@ -338,6 +354,11 @@
         bboxes (mapv bbox (map-indexed corners panels))
         bleed? (fn [p] (true? (:panel/bleed p)))
         frame-break? (fn [p] (boolean (some #{"frame-break" :frame-break} (:panel/tags p))))
+        sheared? (fn [p] (boolean (some #{"sheared-impact" "sheared-tension"} (:panel/tags p))))
+        same-shear-row? (fn [i j]
+                          (and (sheared? (nth panels i)) (sheared? (nth panels j))
+                               (= (:panel/tilt (nth panels i)) (:panel/tilt (nth panels j)))
+                               (< (Math/abs (- (nth (nth bboxes i) 1) (nth (nth bboxes j) 1))) 0.02)))
         bounds-issues
         (->> (map vector (range) panels bboxes)
              (keep (fn [[i p [x0 y0 x1 y1]]]
@@ -350,14 +371,15 @@
               :let [area (bbox-overlap-area (nth bboxes i) (nth bboxes j))]
               :when (and (> area overlap-tolerance)
                          (not (frame-break? (nth panels i)))
-                         (not (frame-break? (nth panels j))))]
+                         (not (frame-break? (nth panels j)))
+                         (not (same-shear-row? i j)))]
           {:code :panel-overlap :severity :error :panel i
            :message (str "panel " i " overlaps panel " j " (bbox area " (round3 area) ")")})
         tilt-issues
         (->> (map vector (range) panels)
              (keep (fn [[i p]]
                      (when-let [tilt (:panel/tilt p)]
-                       (let [impact? (boolean (some #{"impact" :impact} (:panel/tags p)))
+                       (let [impact? (boolean (some #{"impact" :impact "sheared-impact"} (:panel/tags p)))
                              cap (if impact?
                                    (get caps :impact-tilt-max impact-tilt-max)
                                    (get caps :tension-tilt-max tension-tilt-max))]
