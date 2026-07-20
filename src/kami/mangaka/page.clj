@@ -125,6 +125,17 @@
   (let [ps (:panels page) n (count ps)
         lay (str/lower-case (str (:layout page)))]
     (cond
+      ;; Authored Genko/storyboard geometry is authoritative. Values use the
+      ;; portable normalized [x y w h] contract; convert to this compositor's
+      ;; percent coordinate space without reflowing the page.
+      (and (seq ps) (every? #(let [r (:rect %)]
+                              (and (= 4 (count r)) (every? number? r))) ps))
+      {:bleed false
+       :pairs (mapv (fn [p]
+                      (let [[x y w h] (:rect p)]
+                        [p [(* 100.0 x) (* 100.0 y) (* 100.0 w) (* 100.0 h)] nil]))
+                    ps)}
+
       (or (<= n 1) (re-find #"splash|full|spread" lay))
       {:bleed true :pairs (mapv #(conj % nil) (mapv vector ps [[0 0 100 100]]))}
 
@@ -328,32 +339,47 @@
   style map carries :weight (薄さ→色/太さ), :scale (大きさ→フォント), and :shape
   (:spike/:jagged/:burst の叫び系は太い輪郭で強調 — full clip-path は web reader 側).
   Returns bottom-y."
-  [g text cx top w side & [{:keys [weight scale shape]}]]
+  [g text cx top w side & [{:keys [weight scale shape writing-mode columns
+                                   width-ratio height-ratio tail-target]}]]
   (when (and text (seq (str text)))
     (.setFont g (font (weight->style weight) (scaled 25 scale)))
-    (let [shout? (boolean (#{:spike :jagged :burst} shape))
-          pad 17 maxw (int (* w 0.46))
-          lines (wrap g text maxw)
+    (let [vertical? (= writing-mode "vertical-rtl")
+          shout? (boolean (#{:spike :jagged :burst} shape))
+          pad 17 maxw (int (* w (double (or width-ratio 0.46))))
+          lines (if vertical?
+                  (or (seq columns) (mapv str (seq (str text))))
+                  (wrap g text maxw))
           fm (.getFontMetrics g) lh (+ 6 (.getHeight fm))
           tw (reduce max 1 (map #(.stringWidth fm %) lines))
-          bw (+ (* 2 pad) tw) bh (+ (* 2 pad) (* lh (count lines)))
+          bw (if width-ratio (max (+ (* 2 pad) tw) (* w width-ratio)) (+ (* 2 pad) tw))
+          bh (if height-ratio (max (+ (* 2 pad) lh) (* w height-ratio))
+                 (+ (* 2 pad) (* lh (count lines))))
           bx (- cx (/ bw 2.0)) by top
           rad (if shout? 8 38)
           rr (RoundRectangle2D$Double. bx by bw bh rad rad)
           ;; tail: a small triangle dropping from the bubble toward the speaker
           tailx (if (= side :r) (- (+ bx bw) (* bw 0.28)) (+ bx (* bw 0.16)))
-          txs (int-array [(int tailx) (int (+ tailx 26)) (int (+ tailx (if (= side :r) -2 28)))])
-          tys (int-array [(int (+ by bh -4)) (int (+ by bh -4)) (int (+ by bh 24))])]
+          [target-x target-y] (or tail-target
+                                  [(+ tailx (if (= side :r) -2 28)) (+ by bh 24)])
+          txs (int-array [(int tailx) (int (+ tailx 26)) (int target-x)])
+          tys (int-array [(int (+ by bh -4)) (int (+ by bh -4)) (int target-y)])]
       (doto g (.setColor Color/WHITE) (.fillPolygon txs tys 3) (.fill rr)
               (.setColor Color/BLACK) (.setStroke (BasicStroke. (float (if shout? 5.0 3.0))))
               (.drawPolygon txs tys 3) (.draw rr)
               ;; paint over the seam where the tail meets the bubble
               (.setColor Color/WHITE) (.fillRect (int (+ tailx 2)) (int (+ by bh -7)) 22 6))
       (.setColor g (weight->color weight))
-      (doseq [[i ln] (map-indexed vector lines)]
-        (.drawString g ^String ln
-                     (int (- cx (/ (.stringWidth fm ln) 2.0)))
-                     (int (+ by pad (* (inc i) lh) -8))))
+      (if vertical?
+        (let [chars (seq (str text)) rows (max 1 (int (/ (- bh (* 2 pad)) lh)))]
+          (doseq [[i ch] (map-indexed vector chars)]
+            (let [col (quot i rows) row (mod i rows)]
+              (.drawString g (str ch)
+                           (int (- (+ bx bw (- pad)) (* col lh)))
+                           (int (+ by pad (* (inc row) lh) -8))))))
+        (doseq [[i ln] (map-indexed vector lines)]
+          (.drawString g ^String ln
+                       (int (- cx (/ (.stringWidth fm ln) 2.0)))
+                       (int (+ by pad (* (inc i) lh) -8)))))
       (+ by bh 30))))
 
 (defn- draw-sfx
@@ -543,7 +569,9 @@
         ;; text layer (shared, locale-keyed): nameplate + chatter + caption + bubbles + SFX
         (let [els     (t/panel->elements panel)
               narr-el (some #(when (= :narration (:kind %)) %) els)
-              dlgs    (filter #(= :dialogue (:kind %)) els)
+              dlgs    (if (seq (:dialogue panel))
+                        (map #(assoc % :kind :dialogue) (:dialogue panel))
+                        (filter #(= :dialogue (:kind %)) els))
               sfxs    (filter #(= :sfx (:kind %)) els)
               nps     (filter #(= :nameplate (:kind %)) els)
               chat    (filter #(= :chatter (:kind %)) els)]
@@ -557,9 +585,18 @@
                 cx (+ x (* w (if (= side :l) 0.42 0.58)))]
             (loop [ds dlgs top (+ y 22)]
               (when (seq ds)
-                (let [d  (first ds)
-                      nt (bubble g (t/localize (:text d) locale) cx top w side
-                                 {:weight (:weight d) :scale (:scale d) :shape (:bubble d)})]
+                (let [d (first ds)
+                      [rx ry] (:pos d)
+                      dcx (if (number? rx) (+ x (* w rx)) cx)
+                      dtop (if (number? ry) (+ y (* h ry)) top)
+                      [tx ty] (:tail-target d)
+                      target (when (and (number? tx) (number? ty))
+                               [(+ x (* w tx)) (+ y (* h ty))])
+                      nt (bubble g (t/localize (:text d) locale) dcx dtop w side
+                                 {:weight (:weight d) :scale (:scale d) :shape (:bubble d)
+                                  :writing-mode (:writing-mode d) :columns (:columns d)
+                                  :width-ratio (:width d) :height-ratio (:height d)
+                                  :tail-target target})]
                   (recur (rest ds) (or nt (+ top 96)))))))
           (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s)))
           (doseq [np nps] (nameplate! g (t/localize (:text np) locale) x y w h)))
