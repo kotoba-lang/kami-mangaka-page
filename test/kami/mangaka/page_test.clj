@@ -194,3 +194,14 @@
       (is (= out r))
       (is (.exists (io/file out)))
       (is (pos? (.length (io/file out)))))))
+
+(deftest authored-rects-are-authoritative
+  (let [pg {:layout "grid"
+            :panels [{:id "right" :rect [0.55 0.05 0.4 0.35]}
+                     {:id "left" :rect [0.05 0.05 0.45 0.35]}]}
+        pairs (:pairs (page/layout-page pg))]
+    (is (every? #(< (Math/abs %) 1.0e-9)
+                (map -
+                     (mapcat identity [[55.0 5.0 40.0 35.0] [5.0 5.0 45.0 35.0]])
+                     (mapcat second pairs))))
+    (is (every? nil? (map #(nth % 2) pairs)))))
