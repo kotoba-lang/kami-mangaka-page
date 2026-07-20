@@ -340,7 +340,7 @@
   (:spike/:jagged/:burst の叫び系は太い輪郭で強調 — full clip-path は web reader 側).
   Returns bottom-y."
   [g text cx top w side & [{:keys [weight scale shape writing-mode columns
-                                   width-ratio height-ratio tail-target]}]]
+                                   width-ratio height-ratio panel-height tail-target]}]]
   (when (and text (seq (str text)))
     (.setFont g (font (weight->style weight) (scaled 25 scale)))
     (let [vertical? (= writing-mode "vertical-rtl")
@@ -352,7 +352,7 @@
           fm (.getFontMetrics g) lh (+ 6 (.getHeight fm))
           tw (reduce max 1 (map #(.stringWidth fm %) lines))
           bw (if width-ratio (max (+ (* 2 pad) tw) (* w width-ratio)) (+ (* 2 pad) tw))
-          bh (if height-ratio (max (+ (* 2 pad) lh) (* w height-ratio))
+          bh (if height-ratio (max (+ (* 2 pad) lh) (* (or panel-height w) height-ratio))
                  (+ (* 2 pad) (* lh (count lines))))
           bx (- cx (/ bw 2.0)) by top
           rad (if shout? 8 38)
@@ -596,6 +596,7 @@
                                  {:weight (:weight d) :scale (:scale d) :shape (:bubble d)
                                   :writing-mode (:writing-mode d) :columns (:columns d)
                                   :width-ratio (:width d) :height-ratio (:height d)
+                                  :panel-height h
                                   :tail-target target})]
                   (recur (rest ds) (or nt (+ top 96)))))))
           (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s)))
