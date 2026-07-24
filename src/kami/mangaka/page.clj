@@ -734,10 +734,23 @@
                       (assoc seen k b)]))
                  [[] {}] placed))]
     {:dialogue dialogue
-     :warnings (vec (for [d dialogue :when (false? (:fits? d))]
-                      {:text (:text d) :speaker (:speaker d)
-                       :reason :does-not-fit
-                       :hint "shorter line / :below-face? / larger safe zone — this WILL render illegibly"}))}))
+     :warnings (vec (concat
+                     (for [d dialogue :when (false? (:fits? d))]
+                       {:text (:text d) :speaker (:speaker d)
+                        :reason :does-not-fit
+                        :hint "shorter line / :below-face? / larger safe zone — this WILL render illegibly"})
+                     ;; the collision scan returns its last candidate when it
+                     ;; runs out of vertical room, which can still overlap a
+                     ;; predecessor — that means the caller's per-bubble
+                     ;; height budget doesn't leave room for the stack
+                     ;; (2 × target-height 0.6 cannot stack in one panel).
+                     ;; Surfaced, not silently shipped.
+                     (for [[i d] (map-indexed vector dialogue)
+                           e (drop (inc i) dialogue)
+                           :when (rects-overlap? (:rect d) (:rect e))]
+                       {:texts [(:text d) (:text e)]
+                        :reason :mutual-overlap
+                        :hint "stack budget exceeded — lower :target-height/:scale so the bubbles fit the panel together"})))}))
 
 ;; --- bubble placement score (HUNTER×HUNTER 王位継承戦編 baseline) --------------
 ;; Not "does the text fit its own box" (fit-vertical-dialogue already
@@ -796,7 +809,8 @@
   weighted mean of the non-nil dimensions — nil dimensions are excluded,
   not defaulted, so an incomplete input can't average up to a flattering
   score."
-  [{:keys [bubble-rect panel-rect face-bbox corner prev-rect fits? tail-target tilted?]
+  [{:keys [bubble-rect panel-rect face-bbox corner prev-rect below-face? fits?
+           tail-target tilted?]
     :or {panel-rect [0.0 0.0 1.0 1.0] tilted? false}}]
   (let [face-clear (when face-bbox
                       (let [overlap (rect-overlap-area bubble-rect face-bbox)
@@ -813,6 +827,17 @@
                            gy (max 0.0 (- bt qb) (- qt bb))
                            d (max gx gy)]
                        (- 1.0 (min 1.0 (/ d margin))))
+                     ;; a below-face bubble CANNOT hug a top corner — that
+                     ;; strip is exactly what was structurally impossible.
+                     ;; Its reference posture is: hugged on the corner's
+                     ;; x-side, tucked right under the face. Scoring it on
+                     ;; corner distance handed every below-face bubble an
+                     ;; unconditional 0.
+                     (and below-face? face-bbox corner)
+                     (let [fb (nth face-bbox 3)
+                           dx (case corner (:tl :bl) (- bl pl) (:tr :br) (- pr br))
+                           dy (max 0.0 (- bt fb))]
+                       (- 1.0 (min 1.0 (/ (max 0.0 dx dy) margin))))
                      corner
                      (let [dx (case corner (:tl :bl) (- bl pl) (:tr :br) (- pr br))
                            dy (case corner (:tl :tr) (- bt pt) (:bl :br) (- pb bb))]
