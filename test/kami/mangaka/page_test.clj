@@ -618,3 +618,50 @@
           "square box reaches the corner — pixel is the box's white fill")
       (is (< 100 (corner-r (render nil)) 160)
           "radius-38 corner is cut — pixel stays background gray"))))
+
+;; --- SFX :pos + :monochrome? -------------------------------------------------
+
+(deftest compose-page-monochrome-grayscales-panel-art
+  (testing "a saturated-colour panel image renders with r==g==b everywhere
+            under :monochrome? true (video frames keep colour casts even
+            under a black-and-white prompt)"
+    (let [src (java.awt.image.BufferedImage. 64 64 java.awt.image.BufferedImage/TYPE_INT_RGB)
+          g (.createGraphics src)
+          _ (do (.setColor g (java.awt.Color. 40 80 200)) (.fillRect g 0 0 64 64) (.dispose g))
+          f (java.io.File/createTempFile "mono-src" ".png")
+          _ (javax.imageio.ImageIO/write src "png" f)
+          out (str (System/getProperty "java.io.tmpdir") "/mono-test.png")
+          _ (page/compose-page! {:panels [{:id "a" :size "wide"}]}
+                                (constantly f) out :monochrome? true)
+          img (javax.imageio.ImageIO/read (java.io.File. ^String out))
+          ;; sample inside the panel art area
+          rgb (.getRGB img 300 200)
+          r (bit-and (bit-shift-right rgb 16) 0xff)
+          gg (bit-and (bit-shift-right rgb 8) 0xff)
+          b (bit-and rgb 0xff)]
+      (is (= r gg b) (str "expected gray, got " [r gg b])))))
+
+(deftest sfx-pos-moves-the-anchor
+  (testing "an :sfx entry's :pos [px py] moves where the white ink lands —
+            default anchor used to sit at (0.5, 0.3w) unconditionally,
+            landing on a face on a real page"
+    (let [render (fn [pos]
+                   (let [out (str (System/getProperty "java.io.tmpdir")
+                                  "/sfx-pos-" (hash pos) ".png")]
+                     (page/compose-page!
+                      {:panels [{:id "a" :size "wide"
+                                 :sfx [(cond-> {:text "ピ" :scale 0.6}
+                                         pos (assoc :pos pos))]}]}
+                      (constantly nil) out)
+                     (javax.imageio.ImageIO/read (java.io.File. ^String out))))
+          white-centroid (fn [img]
+                           (let [pts (for [x (range 0 1075 3) y (range 0 700 3)
+                                           :let [rgb (.getRGB img x y)
+                                                 r (bit-and (bit-shift-right rgb 16) 0xff)]
+                                           :when (> r 240)]
+                                       [x y])]
+                             [(/ (reduce + (map first pts)) (max 1 (count pts)))
+                              (/ (reduce + (map second pts)) (max 1 (count pts)))]))
+          [dx _] (white-centroid (render nil))
+          [lx _] (white-centroid (render [0.15 0.8]))]
+      (is (< lx dx) "pos [0.15 …] must land left of the default 0.5 anchor"))))
