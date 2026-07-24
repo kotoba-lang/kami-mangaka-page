@@ -155,16 +155,46 @@
             (vswap! y + h)))
         {:bleed false :pairs @pairs}))))
 
-;; --- fonts (pick an installed JP-capable family) -----------------------------
+;; --- fonts (pick an installed JP-capable family, one per :font-role) ---------
+;; kami.mangaka.expression's archetypes/registers resolve a :font-role tag
+;; (:gothic :mincho :maru :bold-mincho :handwritten :brush :kyokasho
+;; :antigochi :digital :horror) per speaker/register -- e.g. :stoic/:energetic
+;; speak in :gothic, :strategist/:narration in :mincho, :gentle in :maru,
+;; :chatter/:mob in :handwritten. Each resolves independently (same
+;; `some avail […]` graceful-degrade pattern as the old single
+;; `jp-font-family`) so a speaker's dialogue actually looks different, not
+;; just differently weighted.
 
-(def ^:private jp-font-family
+(defn- family-of [& candidates]
   (let [avail (set (.getAvailableFontFamilyNames
                     (GraphicsEnvironment/getLocalGraphicsEnvironment)))]
-    (some avail ["Hiragino Maru Gothic ProN" "Hiragino Sans" "YuGothic"
-                 "Yu Gothic" "Noto Sans CJK JP" "Noto Sans JP"])))
+    (some avail candidates)))
 
-(defn- font [style size]
-  (Font. (or jp-font-family Font/SANS_SERIF) style (int size)))
+(def ^:private jp-font-family
+  (family-of "Hiragino Maru Gothic ProN" "Hiragino Sans" "YuGothic"
+             "Yu Gothic" "Noto Sans CJK JP" "Noto Sans JP"))
+
+(def font-role-families
+  "font-role -> concrete installed family. :default is the old single
+  jp-font-family (also the fallback for a role with no closer match)."
+  {:default        jp-font-family
+   :gothic         (family-of "Hiragino Sans" "YuGothic" "Yu Gothic" "Noto Sans JP" jp-font-family)
+   :mincho         (family-of "Hiragino Mincho ProN" "YuMincho" "Yu Mincho" "Noto Serif JP" jp-font-family)
+   :bold-mincho    (family-of "Toppan Bunkyu Midashi Mincho" "Hiragino Mincho ProN" "YuMincho" jp-font-family)
+   :maru           (family-of "Hiragino Maru Gothic ProN" "Tsukushi A Round Gothic" jp-font-family)
+   :handwritten    (family-of "nskpenkaishotai100koteitehon" "Klee" jp-font-family)
+   :brush          (family-of "nskpenkaishotai100koteitehon" "Klee" jp-font-family)
+   :kyokasho       (family-of "BIZ UDMincho" "nskpenkaishotai100koteitehon" jp-font-family)
+   :antigochi      (family-of "Toppan Bunkyu Gothic" "Gothic A1" jp-font-family)
+   :digital        (family-of "Osaka" jp-font-family)
+   :horror         (family-of "Hiragino Mincho ProN" jp-font-family)})
+
+(defn- family-for [font-role]
+  (or (get font-role-families font-role) jp-font-family Font/SANS_SERIF))
+
+(defn- font
+  ([style size] (font nil style size))
+  ([font-role style size] (Font. (family-for font-role) style (int size))))
 
 ;; --- manga-expression → Java2D mapping (kami.mangaka.expression tags) ---------
 ;; 文字の薄さ (:weight) → 色/太さ, 文字の大きさ (:scale) → フォントサイズ,
@@ -315,10 +345,11 @@
 
 (defn- caption-box
   "Narration → a small caption box at the panel's top-left (serif, white). The
-  optional style map carries :weight (薄さ→色/太さ) + :scale (大きさ→フォント)."
-  [g text x y w & [{:keys [weight scale]}]]
+  optional style map carries :weight (薄さ→色/太さ) + :scale (大きさ→フォント)
+  + :font-role (see `bubble`)."
+  [g text x y w & [{:keys [weight scale font-role]}]]
   (when (and text (seq (str text)))
-    (.setFont g (font (weight->style weight) (scaled 22 scale)))
+    (.setFont g (font font-role (weight->style weight) (scaled 22 scale)))
     (let [pad 10 maxw (int (- (* w 0.62) (* 2 pad)))
           lines (wrap g text maxw)
           fm (.getFontMetrics g) lh (+ 4 (.getHeight fm))
@@ -336,13 +367,17 @@
 (defn- bubble
   "Dialogue → a white rounded speech bubble with a tail + black outline + JP text.
   `cx` is the desired bubble centre; `side` (:l/:r) aims the tail. The optional
-  style map carries :weight (薄さ→色/太さ), :scale (大きさ→フォント), and :shape
-  (:spike/:jagged/:burst の叫び系は太い輪郭で強調 — full clip-path は web reader 側).
+  style map carries :weight (薄さ→色/太さ), :scale (大きさ→フォント), :shape
+  (:spike/:jagged/:burst の叫び系は太い輪郭で強調 — full clip-path は web reader 側),
+  and :font-role (kami.mangaka.expression's per-archetype/register typeface —
+  :gothic/:mincho/:maru/:handwritten/… — see `font-role-families`; a speaker's
+  dialogue actually changes typeface, not just weight/size).
   Returns bottom-y."
   [g text cx top w side & [{:keys [weight scale shape writing-mode columns
-                                   width-ratio height-ratio panel-height tail-target]}]]
+                                   width-ratio height-ratio panel-height tail-target
+                                   font-role]}]]
   (when (and text (seq (str text)))
-    (.setFont g (font (weight->style weight) (scaled 25 scale)))
+    (.setFont g (font font-role (weight->style weight) (scaled 25 scale)))
     (let [vertical? (= writing-mode "vertical-rtl")
           shout? (boolean (#{:spike :jagged :burst} shape))
           pad 17 maxw (int (* w (double (or width-ratio 0.46))))
@@ -384,14 +419,16 @@
 
 (defn- draw-sfx
   "SFX (擬音) → bold white text with a black stroke, tilted, upper-right of the
-  panel. The locale-resolved string (e.g. ちゃぷ / lap…)."
-  [g text x y w & [scale]]
+  panel. The locale-resolved string (e.g. ちゃぷ / lap…). `font-role` (see
+  `bubble`) picks the typeface — SFX usually wants :brush, not the dialogue
+  default."
+  [g text x y w & [scale font-role]]
   (when (and text (seq (str text)))
     (let [g2 (.create g)]
       (try
         (let [fsz (int (max 30 (* w 0.16 (double (or scale 1.0)))))
               sx  (int (+ x (* w 0.5))) sy (int (+ y (* w 0.3)))]
-          (.setFont g2 (font Font/BOLD fsz))
+          (.setFont g2 (font font-role Font/BOLD fsz))
           (.rotate g2 (Math/toRadians -8) sx sy)
           (.setColor g2 Color/BLACK)
           (doseq [dx [-3 -2 2 3] dy [-3 -2 2 3]]
@@ -416,10 +453,13 @@
 
 (defn line-height-for
   "Pixel line-height (character cell height, vertical writing) for a given
-  :scale/:weight — mirrors `bubble`'s `lh` exactly (font size = (scaled 25
-  scale), lh = 6 + FontMetrics.getHeight)."
-  [{:keys [scale weight]}]
-  (let [f (font (weight->style weight) (scaled 25 scale))
+  :scale/:weight/:font-role — mirrors `bubble`'s `lh` exactly (font size =
+  (scaled 25 scale), lh = 6 + FontMetrics.getHeight). Different :font-role
+  families have different metrics at the same point size, so this MUST take
+  :font-role too or fit-vertical-dialogue's box would be sized for the wrong
+  typeface's line height."
+  [{:keys [scale weight font-role]}]
+  (let [f (font font-role (weight->style weight) (scaled 25 scale))
         fm (.getFontMetrics ^java.awt.Graphics2D @metrics-scratch f)]
     (+ 6 (.getHeight fm))))
 
@@ -446,33 +486,43 @@
   own placement formula, not a separate approximation of it) to hold every
   character inside the drawn bubble.
 
-  `:target-height` (default 0.5) is the caller's DESIRED height (an
-  aesthetic choice — short for a one-word interjection near a face, tall for
-  a paragraph of narration): it is used as-is whenever the resulting box
-  already fits `:max-width` (default 0.94) at that height. Only when the
-  text is too wide at :target-height does this grow the height (taller
-  column = fewer columns = narrower) up to `:max-height` (default 0.94)
-  looking for a box that fits; if even :max-height doesn't fit :max-width,
-  returns :fits? false at the caps — the caller should shrink :scale and
-  retry rather than ship a box that silently draws characters past its own
-  left edge (see the `bubble` docstring: it does not clip or grow itself)."
-  [text {:keys [scale weight panel-w panel-h max-width max-height target-height]
-         :or {max-width 0.94 max-height 0.94 target-height 0.5}}]
+  The search starts TIGHT (rows=1: the shortest, widest box the text could
+  possibly use) and grows rows only as needed, so the returned :height is
+  never padded past what the text actually needs — a caller that always got
+  a box padded out to some fixed height regardless of text length is why
+  bubbles used to render as mostly empty white space. Rows grows for either
+  of two reasons: (1) the box is still too WIDE at `:max-width` (default
+  0.94) — keeps growing (taller column = fewer, narrower columns) up to
+  `:max-height` (default 0.94), returning :fits? false at the caps if even
+  that doesn't fit (the caller should shrink :scale and retry rather than
+  ship a box that silently draws characters past its own left edge — see
+  the `bubble` docstring, it does not clip or grow itself); or (2) the box
+  is already narrow enough but unattractively FLAT (wide relative to tall —
+  a 42-character narration in a wide panel is mathematically satisfied by 2
+  rows x 21 columns, which is not how manga narration boxes read) — grows
+  toward `:target-height` (default 0.5, a soft aesthetic ceiling, NOT a
+  floor) until the box's aspect clears `:min-aspect` (default 0.6, i.e.
+  height >= width * 0.6) or :target-height's row budget is exhausted,
+  whichever comes first."
+  [text {:keys [scale weight font-role panel-w panel-h max-width max-height
+                target-height min-aspect]
+         :or {max-width 0.94 max-height 0.94 target-height 0.5 min-aspect 0.6}}]
   (let [n (count (str text))
-        lh (line-height-for {:scale scale :weight weight})
+        lh (line-height-for {:scale scale :weight weight :font-role font-role})
         pad 17
         max-rows (vertical-rows-for (* panel-h max-height) lh)
-        start-rows (max 1 (min max-rows (vertical-rows-for (* panel-h target-height) lh)))
+        target-rows (max 1 (min max-rows (vertical-rows-for (* panel-h target-height) lh)))
         box-at (fn [rows]
                  (let [cols (vertical-cols-needed n rows)
                        bw (+ (* 2 pad) (* cols lh))
                        bh (+ (* 2 pad) (* rows lh))]
-                   {:width (/ bw panel-w) :height (max target-height (/ bh panel-h))
-                    :cols cols :rows rows}))]
-    (loop [rows start-rows]
-      (let [{:keys [width] :as box} (box-at rows)]
+                   {:width (/ bw panel-w) :height (/ bh panel-h) :cols cols :rows rows}))]
+    (loop [rows 1]
+      (let [{:keys [width height] :as box} (box-at rows)
+            wide-enough? (<= width max-width)
+            tall-enough? (or (>= rows target-rows) (>= height (* width min-aspect)))]
         (cond
-          (<= width max-width) (assoc box :fits? true)
+          (and wide-enough? tall-enough?) (assoc box :fits? true)
           (>= rows max-rows) (assoc (box-at max-rows) :width max-width :fits? false)
           :else (recur (inc rows)))))))
 
@@ -482,9 +532,9 @@
   width fits within `:max-width` (default 0.9) of the panel. `:fits? false`
   means the caller should lower :scale — draw-sfx does not wrap or shrink
   SFX text itself."
-  [text {:keys [scale panel-w] :or {scale 1.0}}]
+  [text {:keys [scale panel-w font-role] :or {scale 1.0}}]
   (let [fsz (int (max 30 (* panel-w 0.16 (double scale))))
-        f (font Font/BOLD fsz)
+        f (font font-role Font/BOLD fsz)
         fm (.getFontMetrics ^java.awt.Graphics2D @metrics-scratch f)
         tw (.stringWidth fm (str text))]
     {:font-size fsz :text-width tw :fits? (<= tw (* panel-w 0.9))}))
@@ -684,7 +734,8 @@
             (chatter! g (map #(t/localize (:text %) locale) chat) x y w))
           (when narr-el
             (caption-box g (t/localize (:text narr-el) locale) x y w
-                         {:weight (:weight narr-el) :scale (:scale narr-el)}))
+                         {:weight (:weight narr-el) :scale (:scale narr-el)
+                          :font-role (:font-role narr-el)}))
           ;; alternate bubble side per panel for rhythm; keep inside the panel
           (let [side (if (even? idx) :l :r)
                 cx (+ x (* w (if (= side :l) 0.42 0.58)))]
@@ -701,10 +752,10 @@
                                  {:weight (:weight d) :scale (:scale d) :shape (:bubble d)
                                   :writing-mode (:writing-mode d) :columns (:columns d)
                                   :width-ratio (:width d) :height-ratio (:height d)
-                                  :panel-height h
+                                  :panel-height h :font-role (:font-role d)
                                   :tail-target target})]
                   (recur (rest ds) (or nt (+ top 96)))))))
-          (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s)))
+          (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s) (:font-role s)))
           (doseq [np nps] (nameplate! g (t/localize (:text np) locale) x y w h)))
         ;; 視線誘導 review overlay — opt-in only, on top of everything in the panel
         (when gaze-overlay?

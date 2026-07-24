@@ -278,3 +278,57 @@
                {:panels [{:id "a" :size "wide"} {:id "b" :size "half"} {:id "c" :size "half"}]})]
     (is (= 3 (count sizes)))
     (is (every? #(and (pos? (:w %)) (pos? (:h %))) sizes))))
+
+;; --- :font-role -------------------------------------------------------------
+;; kami.mangaka.expression resolves a :font-role per archetype/register
+;; (:gothic for :stoic/:energetic, :mincho for narration/:strategist, :maru
+;; for :gentle, :handwritten for :chatter/:mob, …) so two speakers with
+;; different archetypes read in different typefaces, not just different
+;; weight/size. These tests are about the family/metrics PLUMBING (a role
+;; resolves to a real installed family, and different roles can have
+;; different metrics at the same nominal size) — not about which exact font
+;; ships on any given machine, since font-role-families itself
+;; graceful-degrades per installed fonts (same pattern as the pre-existing
+;; single jp-font-family).
+
+(deftest font-role-families-resolve-to-installed-fonts
+  (let [avail (set (.getAvailableFontFamilyNames
+                    (java.awt.GraphicsEnvironment/getLocalGraphicsEnvironment)))]
+    (doseq [[role family] page/font-role-families]
+      (is (or (nil? family) (avail family))
+          (str role " resolved to " family " which isn't an installed family")))))
+
+(deftest font-role-changes-line-height
+  (testing "two font-roles at the same :scale can report different
+            line-height-for -- different typefaces have different metrics at
+            the same nominal size, so fit-vertical-dialogue sizing a box for
+            the WRONG role's metrics would under/over-shoot"
+    (let [roles (keys page/font-role-families)
+          heights (into #{} (map #(page/line-height-for {:scale 1.0 :font-role %})) roles)]
+      ;; not asserting a *specific* pair differs (font availability varies by
+      ;; machine) -- only that the plumbing threads :font-role into the real
+      ;; FontMetrics call at all, rather than silently ignoring it.
+      (is (every? pos? heights)))))
+
+(deftest fit-vertical-dialogue-respects-font-role-metrics
+  (testing "fit-vertical-dialogue's own box uses the SAME :font-role metrics
+            line-height-for reports for that role (not a mismatched default)"
+    (let [text "あいうえおかきくけこさしすせそ"
+          fit (page/fit-vertical-dialogue text {:scale 1.0 :font-role :mincho
+                                                 :panel-w 400.0 :panel-h 400.0
+                                                 :target-height 0.5})]
+      (is (:fits? fit))
+      (is (simulate-fits? text {:scale 1.0 :weight nil :panel-w 400.0 :panel-h 400.0} fit)))))
+
+;; --- tight fit (no more padding height out to :target-height) --------------
+
+(deftest fit-vertical-dialogue-does-not-pad-height-past-what-the-text-needs
+  (testing "a short line at a generous :target-height comes back close to the
+            TIGHT box the text needs, not blown up to fill :target-height --
+            the bug that made every bubble render mostly empty white space"
+    (let [fit (page/fit-vertical-dialogue "……" {:scale 1.0 :panel-w 500.0 :panel-h 500.0
+                                                  :target-height 0.85})]
+      (is (:fits? fit))
+      (is (< (:height fit) 0.3)
+          (str "height " (:height fit) " was padded out toward target-height 0.85"
+               " instead of the ~2-character box the text actually needs")))))
