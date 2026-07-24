@@ -220,13 +220,13 @@
   {:width :height} (against `panel-w`/`panel-h`) lands within the box —
   the same col=(quot i rows) placement `bubble` itself uses."
   [text {:keys [scale weight panel-w panel-h]} {:keys [width height]}]
-  (let [lh (page/line-height-for {:scale scale :weight weight})
-        pad 17
+  (let [{:keys [pad char-pitch col-pitch]} (page/vertical-metrics
+                                            {:scale scale :weight weight})
         bw (* width panel-w) bh (* height panel-h)
-        rows (max 1 (int (/ (- bh (* 2 pad)) lh)))
+        rows (max 1 (int (/ (+ (- bh (* 2 pad)) 0.5) char-pitch)))
         n (count (str text))
-        max-col (quot (dec (max 1 n)) rows)]
-    (<= (* max-col lh) (- bw (* 2 pad)))))
+        cols (inc (quot (dec (max 1 n)) rows))]
+    (<= (* cols col-pitch) (+ (- bw (* 2 pad)) 0.5))))
 
 (deftest fit-vertical-dialogue-regression-dropped-characters
   (testing "a 42-char narration in a wide panel (the exact case that used to
@@ -524,15 +524,13 @@
             surfaced as :mutual-overlap, not silently shipped (found: two
             0.48-tall narration boxes overlapping by 0.025 on a real page)"
     (let [{:keys [warnings]}
-          (page/layout-bubbles {:panel-w 983.0 :panel-h 427.7}
-                               [{:text "廊下から、隣のD組の白瀬寧が、コメッコンの"
-                                 :corner :tr :scale 0.95
-                                 :target-height 0.6 :min-aspect 1.6
-                                 :face-bbox [0.16 0.17 0.25 0.27]}
-                                {:text "ドーナツ袋を片手に、ずかずかと入ってきた。"
-                                 :corner :tr :scale 0.95
-                                 :target-height 0.6 :min-aspect 1.6
-                                 :face-bbox [0.16 0.17 0.25 0.27]}])]
+          (page/layout-bubbles {:panel-w 483.5 :panel-h 316.77}
+                               [{:text "廊下から、隣のD組の白瀬寧が、コメッ"
+                                 :corner :tr :scale 0.95 :scale-floor 0.95
+                                 :target-height 0.94 :min-aspect 3.0}
+                                {:text "ドーナツ袋を片手に、ずかずかと入って"
+                                 :corner :tr :scale 0.95 :scale-floor 0.95
+                                 :target-height 0.94 :min-aspect 3.0}])]
       (is (some #(= :mutual-overlap (:reason %)) warnings)))))
 
 (deftest bubble-placement-score-below-face-hugs-the-face-not-the-corner
@@ -547,3 +545,38 @@
                   :face-bbox [0.65 0.15 0.88 0.45]})]
       (is (> (:corner-hug tucked) 0.6))
       (is (= 0.0 (:corner-hug plain))))))
+
+;; --- vertical metrics: em-based tightness + the off-by-one clip --------------
+
+(deftest vertical-metrics-are-em-proportional-not-fixed
+  (testing "pad/pitches scale with the font — a whisper bubble is snug, a
+            narration box doesn't keep a fixed 17px moat"
+    (let [small (page/vertical-metrics {:scale 0.35})
+          large (page/vertical-metrics {:scale 0.95})]
+      (is (< (:pad small) (:pad large)))
+      (is (< (:char-pitch small) (:char-pitch large)))
+      (is (<= (:char-pitch large) (int (* (:font-size large) 1.2)))
+          "char pitch stays near 1.1em — the reference's near-touching set")
+      (is (<= (:col-pitch large) (int (* (:font-size large) 1.35)))))))
+
+(deftest vertical-glyphs-do-not-cross-the-bubble-border
+  (testing "pixel-level regression for the 廊/ナ clip: render a large-scale
+            vertical bubble onto a gray canvas and assert no ink lands right
+            of the bubble's right edge (the old col-0 placement drew the
+            first column's glyph ON the right padding line, crossing the
+            border at scale≈0.95)"
+    (let [img (java.awt.image.BufferedImage. 800 600 java.awt.image.BufferedImage/TYPE_INT_RGB)
+          g (.createGraphics img)]
+      (.setColor g (java.awt.Color. 128 128 128))
+      (.fillRect g 0 0 800 600)
+      (#'page/bubble g "廊下から、隣のD組の白瀬寧が" 400 50 800 :l
+       {:scale 0.95 :writing-mode "vertical-rtl"
+        :width-ratio 0.4 :height-ratio 0.5 :panel-height 600 :tail? false})
+      ;; bubble: cx=400 bw=320 → right edge x=560; border stroke ≤ ±3px.
+      (let [ink (for [x (range 566 640) y (range 40 400)
+                      :let [rgb (.getRGB img x y)
+                            r (bit-and (bit-shift-right rgb 16) 0xff)]
+                      :when (< r 100)]
+                  [x y])]
+        (is (empty? ink)
+            (str "found ink right of the bubble border at " (take 5 ink)))))))
