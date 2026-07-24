@@ -205,3 +205,76 @@
                      (mapcat identity [[55.0 5.0 40.0 35.0] [5.0 5.0 45.0 35.0]])
                      (mapcat second pairs))))
     (is (every? nil? (map #(nth % 2) pairs)))))
+
+;; --- fit-vertical-dialogue / fit-sfx --------------------------------------
+;; A box `bubble` will draw MUST hold every character inside itself: `bubble`
+;; places char i at col=(quot i rows) and never clips or grows the box, so a
+;; too-small box silently draws tail characters past the bubble's own left
+;; edge (illegible against the panel art, not a crash). These tests replay
+;; `bubble`'s own col/row formula against fit-vertical-dialogue's output —
+;; not a second approximation of it — so a false positive here would mean
+;; the two are actually out of sync, not just "the box looked small."
+
+(defn- simulate-fits?
+  "True iff every character bubble would draw for `text` at this exact
+  {:width :height} (against `panel-w`/`panel-h`) lands within the box —
+  the same col=(quot i rows) placement `bubble` itself uses."
+  [text {:keys [scale weight panel-w panel-h]} {:keys [width height]}]
+  (let [lh (page/line-height-for {:scale scale :weight weight})
+        pad 17
+        bw (* width panel-w) bh (* height panel-h)
+        rows (max 1 (int (/ (- bh (* 2 pad)) lh)))
+        n (count (str text))
+        max-col (quot (dec (max 1 n)) rows)]
+    (<= (* max-col lh) (- bw (* 2 pad)))))
+
+(deftest fit-vertical-dialogue-regression-dropped-characters
+  (testing "a 42-char narration in a wide panel (the exact case that used to
+            silently drop はずかずか's second ずか when width/height were
+            guessed instead of computed) now verifiably fits"
+    (let [text "廊下から、隣のD組の白瀬寧が、コメッコンのドーナツ袋を片手に、ずかずかと入ってきた。"
+          opts {:scale 0.6 :weight :light :panel-w 983.0 :panel-h 427.7 :target-height 0.85}
+          fit (page/fit-vertical-dialogue text opts)]
+      (is (:fits? fit))
+      (is (simulate-fits? text opts fit)))))
+
+(deftest fit-vertical-dialogue-grows-height-before-giving-up
+  (testing "text too wide at the requested target-height grows taller
+            (fewer, narrower columns) rather than reporting fits? false
+            prematurely"
+    (let [text "起きないと、コメッコンの米粉ドーナツ、わたしが、全部食べるよ"
+          opts {:scale 0.55 :weight :bold :panel-w 483.5 :panel-h 316.8 :target-height 0.1}
+          fit (page/fit-vertical-dialogue text opts)]
+      (is (:fits? fit))
+      (is (> (:height fit) 0.1) "grew past the too-small target-height")
+      (is (simulate-fits? text opts fit)))))
+
+(deftest fit-vertical-dialogue-short-text-stays-compact
+  (testing "a short interjection doesn't get blown up to target-height's
+            full box — cols stays small"
+    (let [fit (page/fit-vertical-dialogue "……" {:scale 0.85 :weight :faint
+                                                  :panel-w 483.5 :panel-h 316.8
+                                                  :target-height 0.18})]
+      (is (:fits? fit))
+      (is (<= (:cols fit) 2)))))
+
+(deftest fit-vertical-dialogue-reports-fits-false-at-the-caps
+  (testing "even :max-height can't rescue a huge string crammed into a tiny
+            panel at a large scale -- fits? false tells the caller to shrink
+            :scale rather than silently shipping a box that drops characters"
+    (let [fit (page/fit-vertical-dialogue
+               "あいうえおかきくけこさしすせそたちつてとなにぬねの"
+               {:scale 3.0 :panel-w 100.0 :panel-h 100.0})]
+      (is (false? (:fits? fit))))))
+
+(deftest fit-sfx-reports-width-fit
+  (let [ok (page/fit-sfx "ドン" {:scale 1.0 :panel-w 400.0})
+        too-wide (page/fit-sfx "うわああああああああああ" {:scale 1.5 :panel-w 200.0})]
+    (is (:fits? ok))
+    (is (false? (:fits? too-wide)))))
+
+(deftest panel-pixel-sizes-matches-layout-page-panel-count
+  (let [sizes (page/panel-pixel-sizes
+               {:panels [{:id "a" :size "wide"} {:id "b" :size "half"} {:id "c" :size "half"}]})]
+    (is (= 3 (count sizes)))
+    (is (every? #(and (pos? (:w %)) (pos? (:h %))) sizes))))
