@@ -539,7 +539,85 @@
         tw (.stringWidth fm (str text))]
     {:font-size fsz :text-width tw :fits? (<= tw (* panel-w 0.9))}))
 
-;; --- 効果線 (effectLines) + 視線誘導 (gaze) — ai.gftd.mangaka page lexicon ----
+;; --- bubble placement score (HUNTER×HUNTER 王位継承戦編 baseline) --------------
+;; Not "does the text fit its own box" (fit-vertical-dialogue already
+;; guarantees that) but "is the box PLACED the way this library's own
+;; observation data (komawari_styles.edn, sourced from real 冨樫義博
+;; panels — :nameplate/:chatter/:energetic/:hot-blooded/:cold-menace) says a
+;; manga bubble reads": flush against a panel corner, never over the
+;; speaker's own face, tail landing ON the speaker, panel border left
+;; rectilinear (Togashi: dynamism lives in bubble register contrast, not
+;; frame shearing). Found the hard way authoring a real genko page: a box
+;; that only satisfies fit-vertical-dialogue's :fits? can still fully cover
+;; a character's eyes — that is a DIFFERENT failure this scores separately
+;; and weights highest, because it is the one a "looks fine" skim misses.
+
+(defn- rect-overlap-area [[l1 t1 r1 b1] [l2 t2 r2 b2]]
+  (* (max 0.0 (- (min r1 r2) (max l1 l2)))
+     (max 0.0 (- (min b1 b2) (max t1 t2)))))
+
+(defn- rect-area [[l t r b]] (* (max 0.0 (- r l)) (max 0.0 (- b t))))
+
+(defn- point-in-rect? [[x y] [l t r b]] (and (<= l x r) (<= t y b)))
+
+(defn bubble-placement-score
+  "One bubble's placement, scored against the baseline above. Inputs (all
+  panel-local 0-1 fractions):
+    :bubble-rect  [left top right bottom] — what was actually placed
+    :panel-rect   defaults to [0 0 1 1] (the whole panel)
+    :face-bbox    the speaker's approximate face region, REQUIRED — this
+                  score cannot judge face-clearance without it (a bubble
+                  authored with no :face-bbox scores :face-clear nil, not a
+                  false 1.0 — an unmeasured dimension must read as
+                  unmeasured, not as passing)
+    :corner       :tl/:tr/:bl/:br this bubble was authored to hug, or nil
+    :tail-target  [x y] the tail's endpoint, or nil
+    :tilted?      true if this panel/row used a force-line shear (default
+                  false — komawari_styles.edn's Togashi baseline is
+                  rectilinear; :toriyama-style pages should pass this
+                  explicitly, not silently score as violating their OWN
+                  style)
+
+  Returns {:face-clear :corner-hug :tail-on-speaker :rectilinear :score}.
+  Each dimension is 0-1 or nil (not measured); :score is the weighted mean
+  of the non-nil dimensions — nil dimensions are excluded, not defaulted,
+  so an incomplete input can't average up to a flattering score."
+  [{:keys [bubble-rect panel-rect face-bbox corner tail-target tilted?]
+    :or {panel-rect [0.0 0.0 1.0 1.0] tilted? false}}]
+  (let [face-clear (when face-bbox
+                      (let [overlap (rect-overlap-area bubble-rect face-bbox)
+                            ba (rect-area bubble-rect)]
+                        (if (or (zero? overlap) (zero? ba)) 1.0
+                            (max 0.0 (- 1.0 (* 3.0 (/ overlap ba)))))))
+        [bl bt br bb] bubble-rect
+        [pl pt pr pb] panel-rect
+        corner-hug (when corner
+                     (let [dx (case corner (:tl :bl) (- bl pl) (:tr :br) (- pr br))
+                           dy (case corner (:tl :tr) (- bt pt) (:bl :br) (- pb bb))
+                           margin 0.15]
+                       (- 1.0 (min 1.0 (/ (max 0.0 dx dy) margin)))))
+        tail-on-speaker (when (and tail-target face-bbox)
+                          (if (point-in-rect? tail-target face-bbox) 1.0 0.0))
+        rectilinear (if tilted? 0.0 1.0)
+        weights {:face-clear 0.45 :tail-on-speaker 0.2 :corner-hug 0.2 :rectilinear 0.15}
+        dims {:face-clear face-clear :corner-hug corner-hug
+              :tail-on-speaker tail-on-speaker :rectilinear rectilinear}
+        measured (into {} (filter (comp some? val)) dims)
+        wsum (reduce + (map weights (keys measured)))
+        score (when (pos? wsum)
+                (/ (reduce + (map (fn [[k v]] (* v (get weights k))) measured)) wsum))]
+    (assoc dims :score score)))
+
+(defn panel-placement-score
+  "bubble-placement-score for every dialogue entry in one placed panel (each
+  entry needs :bubble-rect and, to be scored on face-clearance/tail
+  accuracy, :face-bbox/:tail-target/:corner) -> {:bubbles […] :score
+  (mean of the bubbles' own :score, nil-safe)}."
+  [bubbles]
+  (let [scored (mapv bubble-placement-score bubbles)
+        scores (keep :score scored)]
+    {:bubbles scored
+     :score (when (seq scores) (/ (reduce + scores) (count scores)))}))
 ;; Both fields live on the panel in the lexicon's panel-local 0-1000 coordinate
 ;; space (both axes, independent of the panel's pixel size): {:centerX 480
 ;; :centerY 450} means 48% across / 45% down the panel rect. Z-order per the
