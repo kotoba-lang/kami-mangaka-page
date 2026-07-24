@@ -332,3 +332,65 @@
       (is (< (:height fit) 0.3)
           (str "height " (:height fit) " was padded out toward target-height 0.85"
                " instead of the ~2-character box the text actually needs")))))
+
+;; --- bubble-placement-score (HUNTER×HUNTER baseline) -------------------------
+;; Found the hard way: fit-vertical-dialogue guaranteeing text fits its OWN
+;; box says nothing about whether that box was placed on top of the
+;; speaker's face. These tests are about THAT separate failure mode.
+
+(deftest bubble-placement-score-penalizes-covering-the-face
+  (testing "a bubble that fully overlaps the speaker's face bbox scores
+            :face-clear 0, not a false pass"
+    (let [on-face (page/bubble-placement-score
+                   {:bubble-rect [0.1 0.1 0.6 0.6] :face-bbox [0.2 0.2 0.5 0.5]})
+          clear (page/bubble-placement-score
+                 {:bubble-rect [0.6 0.02 0.95 0.3] :face-bbox [0.1 0.3 0.5 0.7]})]
+      (is (= 0.0 (:face-clear on-face)))
+      (is (= 1.0 (:face-clear clear)))
+      (is (< (:score on-face) (:score clear))))))
+
+(deftest bubble-placement-score-partial-overlap-is-between-0-and-1
+  (let [nicked (page/bubble-placement-score
+                {:bubble-rect [0.0 0.0 0.3 0.3] :face-bbox [0.25 0.25 0.6 0.6]})]
+    (is (< 0.0 (:face-clear nicked) 1.0))))
+
+(deftest bubble-placement-score-rewards-corner-hugging
+  (let [flush (page/bubble-placement-score {:bubble-rect [0.0 0.0 0.4 0.3] :corner :tl})
+        near (page/bubble-placement-score {:bubble-rect [0.02 0.02 0.4 0.3] :corner :tl})
+        floating (page/bubble-placement-score {:bubble-rect [0.4 0.4 0.7 0.6] :corner :tl})]
+    (is (= 1.0 (:corner-hug flush)))
+    (is (> (:corner-hug near) 0.8) "the library's own standard 0.02 margin should score close to flush")
+    (is (< (:corner-hug floating) (:corner-hug near)))))
+
+(deftest bubble-placement-score-tail-must-land-on-the-speaker
+  (let [on-speaker (page/bubble-placement-score
+                    {:bubble-rect [0 0 0.3 0.3] :face-bbox [0.5 0.5 0.8 0.8]
+                     :tail-target [0.6 0.6]})
+        off-speaker (page/bubble-placement-score
+                     {:bubble-rect [0 0 0.3 0.3] :face-bbox [0.5 0.5 0.8 0.8]
+                      :tail-target [0.1 0.1]})]
+    (is (= 1.0 (:tail-on-speaker on-speaker)))
+    (is (= 0.0 (:tail-on-speaker off-speaker)))))
+
+(deftest bubble-placement-score-unmeasured-dimensions-are-nil-not-a-free-pass
+  (testing "no :face-bbox given -> :face-clear nil (unmeasured), and the
+            overall :score is the mean of only what WAS measured -- an
+            author who omits face-bbox doesn't get a free 1.0 for it"
+    (let [bare (page/bubble-placement-score {:bubble-rect [0.02 0.02 0.3 0.2]})]
+      (is (nil? (:face-clear bare)))
+      (is (nil? (:tail-on-speaker bare)))
+      (is (some? (:score bare)))
+      (is (= 1.0 (:rectilinear bare))))))
+
+(deftest bubble-placement-score-tilted-panel-fails-rectilinear-unless-declared
+  (let [rigid (page/bubble-placement-score {:bubble-rect [0.02 0.02 0.3 0.2]})
+        sheared (page/bubble-placement-score {:bubble-rect [0.02 0.02 0.3 0.2] :tilted? true})]
+    (is (= 1.0 (:rectilinear rigid)))
+    (is (= 0.0 (:rectilinear sheared)))))
+
+(deftest panel-placement-score-averages-its-bubbles
+  (let [result (page/panel-placement-score
+                [{:bubble-rect [0.02 0.02 0.3 0.2] :corner :tl}
+                 {:bubble-rect [0.6 0.6 0.9 0.9] :face-bbox [0.1 0.1 0.4 0.4]}])]
+    (is (= 2 (count (:bubbles result))))
+    (is (some? (:score result)))))
