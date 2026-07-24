@@ -580,3 +580,41 @@
                   [x y])]
         (is (empty? ink)
             (str "found ink right of the bubble border at " (take 5 ink)))))))
+
+;; --- :caption? — narration is a square box, not a speech bubble --------------
+
+(deftest layout-bubbles-caption-gets-no-tail-and-square-shape
+  (let [{:keys [dialogue]}
+        (page/layout-bubbles half-panel
+                             [{:text "廊下から、隣のD組の白瀬寧が" :caption? true
+                               :corner :tr :scale 0.6
+                               :face-bbox [0.16 0.17 0.25 0.27]}
+                              {:text "ずかずかと入ってきた。" :caption? true
+                               :corner :tr :scale 0.6
+                               :face-bbox [0.16 0.17 0.25 0.27]}])
+        [a b] dialogue]
+    (is (= :caption (:bubble a)))
+    (is (false? (:tail? a)) "narration never gets a tail, even chain-first")
+    (is (nil? (:tail-target a)))
+    (is (false? (:tail? b)))
+    (is (true? (:chained? b)) "captions still stack/chain for placement")))
+
+(deftest caption-shape-renders-square-corners
+  (testing "a :caption bubble's corner pixel is ink (square box reaches the
+            corner); a default bubble's is background (radius-38 cut)"
+    (let [render (fn [shape]
+                   (let [img (java.awt.image.BufferedImage.
+                              800 600 java.awt.image.BufferedImage/TYPE_INT_RGB)
+                         g (.createGraphics img)]
+                     (.setColor g (java.awt.Color. 128 128 128))
+                     (.fillRect g 0 0 800 600)
+                     (#'page/bubble g "説明文のはこ" 400 50 800 :l
+                      {:scale 0.6 :writing-mode "vertical-rtl" :shape shape
+                       :width-ratio 0.4 :height-ratio 0.4 :panel-height 600
+                       :tail? true})
+                     img))
+          corner-r (fn [img] (bit-and (bit-shift-right (.getRGB img 242 52) 16) 0xff))]
+      (is (> (corner-r (render :caption)) 200)
+          "square box reaches the corner — pixel is the box's white fill")
+      (is (< 100 (corner-r (render nil)) 160)
+          "radius-38 corner is cut — pixel stays background gray"))))

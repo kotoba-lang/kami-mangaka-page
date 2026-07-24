@@ -438,7 +438,10 @@
   "Dialogue → a white rounded speech bubble with a tail + black outline + JP text.
   `cx` is the desired bubble centre; `side` (:l/:r) aims the tail. The optional
   style map carries :weight (薄さ→色/太さ), :scale (大きさ→フォント), :shape
-  (:spike/:jagged/:burst の叫び系は太い輪郭で強調 — full clip-path は web reader 側),
+  (:spike/:jagged/:burst の叫び系は太い輪郭で強調 — full clip-path は web reader 側;
+  :caption は説明・ナレーション用の角箱 — 角丸ゼロ・tail 常に無し。reference
+  pages put exposition in rectangular caption boxes hugging the frame, never
+  in a round speech bubble),
   and :font-role (kami.mangaka.expression's per-archetype/register typeface —
   :gothic/:mincho/:maru/:handwritten/… — see `font-role-families`; a speaker's
   dialogue actually changes typeface, not just weight/size).
@@ -453,6 +456,7 @@
     (.setFont g (font font-role (weight->style weight) (scaled 25 scale)))
     (let [vertical? (= writing-mode "vertical-rtl")
           shout? (boolean (#{:spike :jagged :burst} shape))
+          caption? (= :caption shape)
           vm (when vertical? (vertical-metrics {:scale scale :weight weight
                                                 :font-role font-role}))
           pad (if vertical? (:pad vm) 17)
@@ -469,9 +473,9 @@
                                    (* (or panel-height w) height-ratio))
                  (+ (* 2 pad) (* (if vertical? (:char-pitch vm) lh) (count lines))))
           bx (- cx (/ bw 2.0)) by top
-          rad (if shout? 8 38)
+          rad (cond caption? 0 shout? 8 :else 38)
           rr (RoundRectangle2D$Double. bx by bw bh rad rad)
-          geom (when tail?
+          geom (when (and tail? (not caption?))
                  (tail-geometry [bx by bw bh]
                                 (or tail-target
                                     [(+ bx (* bw (if (= side :r) 0.72 0.16)) 13)
@@ -676,6 +680,12 @@
     :below-face?             true = the strip above the face is thinner than
                              the bubble's fixed padding (structurally
                              impossible at any scale) — place BELOW instead
+    :caption?                true = exposition/narration, NOT speech: renders
+                             as a rectangular caption box (:bubble :caption),
+                             never gets a tail or a tail-target — the
+                             reference pages keep narration in square boxes
+                             hugging the frame, only voiced lines get round
+                             bubbles
     :scale :weight :font-role :bubble  style, as resolve-style returns
     :target-height :min-aspect :max-width :scale-floor  fit tuning
   Options :margin (default 0.045) / :gap (0.035) are the breathing margins
@@ -766,12 +776,14 @@
                    (let [k (chain-key b)
                          prev (get seen k)
                          face (:face-bbox b)
-                         tail-target (when (and face (not prev))
+                         caption? (:caption? b)
+                         tail-target (when (and face (not prev) (not caption?))
                                        [(/ (+ (nth face 0) (nth face 2)) 2.0)
                                         (/ (+ (nth face 1) (nth face 3)) 2.0)])]
                      [(conj out (cond-> (assoc b
                                                :writing-mode (or (:writing-mode b) "vertical-rtl")
-                                               :tail? (nil? prev))
+                                               :tail? (and (nil? prev) (not caption?)))
+                                  caption? (assoc :bubble :caption)
                                   tail-target (assoc :tail-target tail-target)
                                   prev (assoc :chained? true :prev-rect (:rect prev))))
                       (assoc seen k b)]))
