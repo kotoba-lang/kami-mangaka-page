@@ -320,6 +320,24 @@
       (.lineTo x (+ y h))
       (.closePath))))
 
+(defn- grayscale
+  "Luma-weighted grayscale copy of `img` — the print-manga monochrome pass.
+  Generated video frames often keep a colour cast (blue night tints etc.)
+  even under a black-and-white prompt; print manga is ink. Applied per
+  panel image when compose-page! gets `:monochrome? true` — lettering,
+  tones and frames are already ink-coloured, so only the art needs it."
+  ^BufferedImage [^BufferedImage img]
+  (let [w (.getWidth img) h (.getHeight img)
+        out (BufferedImage. w h BufferedImage/TYPE_INT_RGB)]
+    (doseq [y (range h) x (range w)]
+      (let [rgb (.getRGB img x y)
+            r (bit-and (bit-shift-right rgb 16) 0xff)
+            g (bit-and (bit-shift-right rgb 8) 0xff)
+            b (bit-and rgb 0xff)
+            l (int (min 255 (+ (* 0.299 r) (* 0.587 g) (* 0.114 b))))]
+        (.setRGB out x y (bit-or (bit-shift-left l 16) (bit-shift-left l 8) l))))
+    out))
+
 (defn- draw-cover
   "Draws `img` covering [x y w h]. An optional komawari `tilt` (degrees) clips
   to the sheared parallelogram instead of the axis-aligned rect — nil/absent
@@ -510,16 +528,21 @@
       (+ by bh 30))))
 
 (defn- draw-sfx
-  "SFX (擬音) → bold white text with a black stroke, tilted, upper-right of the
-  panel. The locale-resolved string (e.g. ちゃぷ / lap…). `font-role` (see
-  `bubble`) picks the typeface — SFX usually wants :brush, not the dialogue
-  default."
-  [g text x y w & [scale font-role]]
+  "SFX (擬音) → bold white text with a black stroke, tilted. The
+  locale-resolved string (e.g. ちゃぷ / lap…). `font-role` (see `bubble`)
+  picks the typeface — SFX usually wants :brush, not the dialogue default.
+  `pos` [px py] places the anchor at panel-local 0-1 fractions — the old
+  fixed anchor (0.5, 0.3·w) dropped a ピ straight onto a character's
+  forehead on a real page; SFX belongs where the sound happens (a tapping
+  thumb, a slammed door), which only the author knows."
+  [g text x y w & [scale font-role pos h]]
   (when (and text (seq (str text)))
     (let [g2 (.create g)]
       (try
         (let [fsz (int (max 30 (* w 0.16 (double (or scale 1.0)))))
-              sx  (int (+ x (* w 0.5))) sy (int (+ y (* w 0.3)))]
+              [px py] pos
+              sx  (int (+ x (* w (double (or px 0.5)))))
+              sy  (int (+ y (if (and py h) (* (double h) (double py)) (* w 0.3))))]
           (.setFont g2 (font font-role Font/BOLD fsz))
           (.rotate g2 (Math/toRadians -8) sx sy)
           (.setColor g2 Color/BLACK)
@@ -1088,8 +1111,10 @@
   print image between the tone layer and the lettering) and `:gaze` (視線誘導,
   review-only: drawn as a dashed red overlay ONLY when called with
   `:gaze-overlay? true` — never part of print output). Both use the panel-local
-  0-1000 coordinate space (see `draw-effect-lines!` / `draw-gaze-overlay!`)."
-  [page img-of out & {:keys [locale gaze-overlay?] :or {locale :ja}}]
+  0-1000 coordinate space (see `draw-effect-lines!` / `draw-gaze-overlay!`).
+  `:monochrome? true` grayscales each panel image before drawing (see
+  `grayscale`) — for video-derived frames that keep a colour cast."
+  [page img-of out & {:keys [locale gaze-overlay? monochrome?] :or {locale :ja}}]
   (let [{:keys [bleed pairs]} (layout-page page)
         canvas (BufferedImage. PAGE-W PAGE-H BufferedImage/TYPE_INT_RGB)
         g (.createGraphics canvas)
@@ -1106,7 +1131,7 @@
             h (- (* ch (/ ph 100.0)) gut)
             f (img-of (:id panel))]
         (if (and f (.exists ^File f))
-          (draw-cover g (ImageIO/read ^File f) x y w h tilt)
+          (draw-cover g (cond-> (ImageIO/read ^File f) monochrome? grayscale) x y w h tilt)
           (placeholder g x y w h (:id panel) tilt))
         ;; 背景トーン (kami.mangaka.expression :tone) — 画像の上, フレーム/文字の下
         ;; (rect-clipped even under a komawari tilt — a sheared tone overlay is
@@ -1127,7 +1152,12 @@
               dlgs    (if (seq (:dialogue panel))
                         (map #(assoc % :kind :dialogue) (:dialogue panel))
                         (filter #(= :dialogue (:kind %)) els))
-              sfxs    (filter #(= :sfx (:kind %)) els)
+              ;; kami-mangaka-text's panel->elements only carries the
+              ;; expression tags — recover layout-only keys (:pos) from the
+              ;; original panel entries by position
+              sfxs    (map (fn [el orig] (merge el (select-keys orig [:pos])))
+                           (filter #(= :sfx (:kind %)) els)
+                           (concat (or (:sfx panel) (:gh/sfx panel)) (repeat nil)))
               nps     (filter #(= :nameplate (:kind %)) els)
               chat    (filter #(= :chatter (:kind %)) els)]
           (when (seq chat)
@@ -1156,7 +1186,8 @@
                                   :tail-target target
                                   :tail? (if (contains? d :tail?) (:tail? d) true)})]
                   (recur (rest ds) (or nt (+ top 96)))))))
-          (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s) (:font-role s)))
+          (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w
+                                     (:scale s) (:font-role s) (:pos s) h))
           (doseq [np nps] (nameplate! g (t/localize (:text np) locale) x y w h)))
         ;; 視線誘導 review overlay — opt-in only, on top of everything in the panel
         (when gaze-overlay?
