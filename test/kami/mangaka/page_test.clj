@@ -517,3 +517,33 @@
     (is (< (:bubble-overlap piled) 0.5)
         "boxes hiding each other's text: the 3-bubble monologue pileup bug")
     (is (< (:score piled) (:score stacked)))))
+
+(deftest layout-bubbles-warns-when-the-stack-budget-is-exceeded
+  (testing "two bubbles whose combined height cannot fit the panel: the
+            collision scan runs out of room and the residual overlap is
+            surfaced as :mutual-overlap, not silently shipped (found: two
+            0.48-tall narration boxes overlapping by 0.025 on a real page)"
+    (let [{:keys [warnings]}
+          (page/layout-bubbles {:panel-w 983.0 :panel-h 427.7}
+                               [{:text "廊下から、隣のD組の白瀬寧が、コメッコンの"
+                                 :corner :tr :scale 0.95
+                                 :target-height 0.6 :min-aspect 1.6
+                                 :face-bbox [0.16 0.17 0.25 0.27]}
+                                {:text "ドーナツ袋を片手に、ずかずかと入ってきた。"
+                                 :corner :tr :scale 0.95
+                                 :target-height 0.6 :min-aspect 1.6
+                                 :face-bbox [0.16 0.17 0.25 0.27]}])]
+      (is (some #(= :mutual-overlap (:reason %)) warnings)))))
+
+(deftest bubble-placement-score-below-face-hugs-the-face-not-the-corner
+  (testing "a below-face bubble tucked under the face, flush on its corner's
+            x-side, is the CORRECT posture — it must not eat corner-hug=0
+            for being unable to reach a structurally-impossible top strip"
+    (let [tucked (page/bubble-placement-score
+                  {:bubble-rect [0.5 0.49 0.95 0.8] :corner :tr :below-face? true
+                   :face-bbox [0.65 0.15 0.88 0.45]})
+          plain (page/bubble-placement-score
+                 {:bubble-rect [0.5 0.49 0.95 0.8] :corner :tr
+                  :face-bbox [0.65 0.15 0.88 0.45]})]
+      (is (> (:corner-hug tucked) 0.6))
+      (is (= 0.0 (:corner-hug plain))))))
