@@ -364,6 +364,8 @@
       (doseq [[i ln] (map-indexed vector lines)]
         (.drawString g ^String ln (int (+ bx pad)) (int (+ by pad (* (inc i) lh) -6)))))))
 
+(declare vertical-metrics)
+
 (defn tail-geometry
   "Where a bubble's tail attaches and how far it reaches, as pure data (so
   the shape is testable without a Graphics2D). The reference pages this
@@ -451,15 +453,21 @@
     (.setFont g (font font-role (weight->style weight) (scaled 25 scale)))
     (let [vertical? (= writing-mode "vertical-rtl")
           shout? (boolean (#{:spike :jagged :burst} shape))
-          pad 17 maxw (int (* w (double (or width-ratio 0.46))))
+          vm (when vertical? (vertical-metrics {:scale scale :weight weight
+                                                :font-role font-role}))
+          pad (if vertical? (:pad vm) 17)
+          maxw (int (* w (double (or width-ratio 0.46))))
           lines (if vertical?
                   (or (seq columns) (mapv str (seq (str text))))
                   (wrap g text maxw))
           fm (.getFontMetrics g) lh (+ 6 (.getHeight fm))
-          tw (reduce max 1 (map #(.stringWidth fm %) lines))
+          tw (if vertical?
+               (:col-pitch vm)
+               (reduce max 1 (map #(.stringWidth fm %) lines)))
           bw (if width-ratio (max (+ (* 2 pad) tw) (* w width-ratio)) (+ (* 2 pad) tw))
-          bh (if height-ratio (max (+ (* 2 pad) lh) (* (or panel-height w) height-ratio))
-                 (+ (* 2 pad) (* lh (count lines))))
+          bh (if height-ratio (max (+ (* 2 pad) (if vertical? (:char-pitch vm) lh))
+                                   (* (or panel-height w) height-ratio))
+                 (+ (* 2 pad) (* (if vertical? (:char-pitch vm) lh) (count lines))))
           bx (- cx (/ bw 2.0)) by top
           rad (if shout? 8 38)
           rr (RoundRectangle2D$Double. bx by bw bh rad rad)
@@ -474,12 +482,23 @@
       (draw-tail! g geom shout?)
       (.setColor g (weight->color weight))
       (if vertical?
-        (let [chars (seq (str text)) rows (max 1 (int (/ (- bh (* 2 pad)) lh)))]
+        ;; column cells advance leftward from the RIGHT padding line: col 0's
+        ;; cell is [right-pad - col-pitch, right-pad], glyph centred in its
+        ;; cell. The old formula drew col 0's glyph left edge AT the right
+        ;; padding line, so at larger scales the glyph crossed the border
+        ;; (廊/ナ clipped on a real page) while the LEFT side kept a
+        ;; pad+one-column ghost margin — the off-by-one behind both the
+        ;; overflow and the '余白空きすぎ' complaints at once.
+        (let [chars (seq (str text))
+              {:keys [font-size char-pitch col-pitch]} vm
+              rows (max 1 (int (/ (+ (- bh (* 2 pad)) 0.5) char-pitch)))
+              x-inset (int (/ (- col-pitch font-size) 2))
+              baseline (int (Math/round (* 0.9 font-size)))]
           (doseq [[i ch] (map-indexed vector chars)]
             (let [col (quot i rows) row (mod i rows)]
               (.drawString g (str ch)
-                           (int (- (+ bx bw (- pad)) (* col lh)))
-                           (int (+ by pad (* (inc row) lh) -8))))))
+                           (int (+ (- (+ bx bw) pad (* (inc col) col-pitch)) x-inset))
+                           (int (+ by pad (* row char-pitch) baseline))))))
         (doseq [[i ln] (map-indexed vector lines)]
           (.drawString g ^String ln
                        (int (- cx (/ (.stringWidth fm ln) 2.0)))
@@ -521,22 +540,46 @@
   (delay (.createGraphics (BufferedImage. 8 8 BufferedImage/TYPE_INT_RGB))))
 
 (defn line-height-for
-  "Pixel line-height (character cell height, vertical writing) for a given
-  :scale/:weight/:font-role — mirrors `bubble`'s `lh` exactly (font size =
-  (scaled 25 scale), lh = 6 + FontMetrics.getHeight). Different :font-role
-  families have different metrics at the same point size, so this MUST take
-  :font-role too or fit-vertical-dialogue's box would be sized for the wrong
-  typeface's line height."
+  "Pixel line-height for HORIZONTAL text (caption wrap etc.) at a given
+  :scale/:weight/:font-role — mirrors `bubble`'s horizontal `lh` exactly
+  (font size = (scaled 25 scale), lh = 6 + FontMetrics.getHeight).
+  Vertical dialogue does NOT use this any more — FontMetrics.getHeight
+  includes Latin leading (~1.5em) which is why vertical text used to sit in
+  boxes far airier than the reference pages; see `vertical-metrics`."
   [{:keys [scale weight font-role]}]
   (let [f (font font-role (weight->style weight) (scaled 25 scale))
         fm (.getFontMetrics ^java.awt.Graphics2D @metrics-scratch f)]
     (+ 6 (.getHeight fm))))
 
+(defn vertical-metrics
+  "The em-derived metrics `bubble`'s vertical-rtl branch draws with, and the
+  single source of truth `fit-vertical-dialogue` replays. Calibrated
+  against the same HUNTER×HUNTER 王位継承戦編 pages as the placement score:
+  vertical character pitch there is ~1.05-1.15em (glyphs nearly touching),
+  column pitch ~1.2-1.3em, and the bubble's inner padding ~0.5-0.8em OF THE
+  FONT SIZE — not a fixed pixel amount, so a small whisper bubble is snug
+  and a large narration box doesn't balloon. The previous metrics
+  (FontMetrics.getHeight()+6 for both pitches ≈1.5em, fixed 17px pad) are
+  why real pages read airy/loose next to the reference. CJK glyphs are
+  em-square, so pitch derives from the font SIZE, not from getHeight's
+  Latin leading."
+  [{:keys [scale]}]
+  (let [fsz (scaled 25 scale)]
+    {:font-size fsz
+     :pad (max 10 (int (Math/round (* fsz 0.6))))
+     :char-pitch (max 1 (int (Math/round (* fsz 1.12))))
+     :col-pitch (max 1 (int (Math/round (* fsz 1.28))))}))
+
 (defn- vertical-rows-for
   "Same `rows` formula as `bubble`'s vertical-text branch: how many
-  characters fit down one column at height `bh`."
-  [bh lh]
-  (max 1 (int (/ (- bh (* 2 17)) lh))))
+  characters fit down one column at height `bh` with char pitch `pitch`
+  and inner padding `pad`."
+  [bh pitch pad]
+  ;; +0.5px slack before the floor: bh often arrives as height-fraction *
+  ;; panel-h where the fraction was computed FROM an exact rows count —
+  ;; float round-trip can land 1e-13 under the exact multiple and floor a
+  ;; row away (a real lost-row hazard, found by the metrics test suite).
+  (max 1 (int (/ (+ (- bh (* 2 pad)) 0.5) pitch))))
 
 (defn- vertical-cols-needed
   "The column index of the LAST character (0-based) + 1, replaying `bubble`'s
@@ -577,14 +620,14 @@
                 target-height min-aspect]
          :or {max-width 0.94 max-height 0.94 target-height 0.5 min-aspect 0.6}}]
   (let [n (count (str text))
-        lh (line-height-for {:scale scale :weight weight :font-role font-role})
-        pad 17
-        max-rows (vertical-rows-for (* panel-h max-height) lh)
-        target-rows (max 1 (min max-rows (vertical-rows-for (* panel-h target-height) lh)))
+        {:keys [pad char-pitch col-pitch]} (vertical-metrics {:scale scale :weight weight
+                                                              :font-role font-role})
+        max-rows (vertical-rows-for (* panel-h max-height) char-pitch pad)
+        target-rows (max 1 (min max-rows (vertical-rows-for (* panel-h target-height) char-pitch pad)))
         box-at (fn [rows]
                  (let [cols (vertical-cols-needed n rows)
-                       bw (+ (* 2 pad) (* cols lh))
-                       bh (+ (* 2 pad) (* rows lh))]
+                       bw (+ (* 2 pad) (* cols col-pitch))
+                       bh (+ (* 2 pad) (* rows char-pitch))]
                    {:width (/ bw panel-w) :height (/ bh panel-h) :cols cols :rows rows}))]
     (loop [rows 1]
       (let [{:keys [width height] :as box} (box-at rows)
