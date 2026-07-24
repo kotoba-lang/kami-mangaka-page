@@ -400,6 +400,95 @@
           (.drawString g2 ^String (str text) sx sy))
         (finally (.dispose g2))))))
 
+;; --- pre-flight sizing (public): compute a dialogue/SFX box BEFORE calling
+;; compose-page!, so callers (genko authoring, generation pipelines) don't
+;; have to guess :width/:height fractions and re-render to find out they were
+;; wrong. `bubble`'s vertical-text loop places character i at
+;; col=(quot i rows), row=(mod i rows) and does NOT clip or grow the bubble
+;; to fit — a box sized too small silently draws the tail characters past the
+;; bubble's own left edge (they land on the panel art, not "dropped" but
+;; effectively illegible). These functions reuse the *exact* same formulas
+;; `bubble` draws with (not an approximation of them), so a box this reports
+;; as fitting is guaranteed to fit when compose-page! actually draws it.
+
+(def ^:private metrics-scratch
+  (delay (.createGraphics (BufferedImage. 8 8 BufferedImage/TYPE_INT_RGB))))
+
+(defn line-height-for
+  "Pixel line-height (character cell height, vertical writing) for a given
+  :scale/:weight — mirrors `bubble`'s `lh` exactly (font size = (scaled 25
+  scale), lh = 6 + FontMetrics.getHeight)."
+  [{:keys [scale weight]}]
+  (let [f (font (weight->style weight) (scaled 25 scale))
+        fm (.getFontMetrics ^java.awt.Graphics2D @metrics-scratch f)]
+    (+ 6 (.getHeight fm))))
+
+(defn- vertical-rows-for
+  "Same `rows` formula as `bubble`'s vertical-text branch: how many
+  characters fit down one column at height `bh`."
+  [bh lh]
+  (max 1 (int (/ (- bh (* 2 17)) lh))))
+
+(defn- vertical-cols-needed
+  "The column index of the LAST character (0-based) + 1, replaying `bubble`'s
+  own `col = (quot i rows)` assignment for i in [0, n) -- i.e. exactly how
+  many columns `bubble` will actually use for `n` characters at `rows` rows
+  per column (not a separate ceil-based estimate of it)."
+  [n rows]
+  (inc (quot (dec (max 1 n)) rows)))
+
+(defn fit-vertical-dialogue
+  "Pre-flight box size for one `writing-mode \"vertical-rtl\"` dialogue
+  string, given the panel's actual pixel `:panel-w`/`:panel-h` (from
+  `layout-page`, NOT guessed) and the same :scale/:weight the caller will
+  pass to `bubble` via the panel's :dialogue map. Returns
+  {:width :height :cols :rows :fits?} — guaranteed (by replaying `bubble`'s
+  own placement formula, not a separate approximation of it) to hold every
+  character inside the drawn bubble.
+
+  `:target-height` (default 0.5) is the caller's DESIRED height (an
+  aesthetic choice — short for a one-word interjection near a face, tall for
+  a paragraph of narration): it is used as-is whenever the resulting box
+  already fits `:max-width` (default 0.94) at that height. Only when the
+  text is too wide at :target-height does this grow the height (taller
+  column = fewer columns = narrower) up to `:max-height` (default 0.94)
+  looking for a box that fits; if even :max-height doesn't fit :max-width,
+  returns :fits? false at the caps — the caller should shrink :scale and
+  retry rather than ship a box that silently draws characters past its own
+  left edge (see the `bubble` docstring: it does not clip or grow itself)."
+  [text {:keys [scale weight panel-w panel-h max-width max-height target-height]
+         :or {max-width 0.94 max-height 0.94 target-height 0.5}}]
+  (let [n (count (str text))
+        lh (line-height-for {:scale scale :weight weight})
+        pad 17
+        max-rows (vertical-rows-for (* panel-h max-height) lh)
+        start-rows (max 1 (min max-rows (vertical-rows-for (* panel-h target-height) lh)))
+        box-at (fn [rows]
+                 (let [cols (vertical-cols-needed n rows)
+                       bw (+ (* 2 pad) (* cols lh))
+                       bh (+ (* 2 pad) (* rows lh))]
+                   {:width (/ bw panel-w) :height (max target-height (/ bh panel-h))
+                    :cols cols :rows rows}))]
+    (loop [rows start-rows]
+      (let [{:keys [width] :as box} (box-at rows)]
+        (cond
+          (<= width max-width) (assoc box :fits? true)
+          (>= rows max-rows) (assoc (box-at max-rows) :width max-width :fits? false)
+          :else (recur (inc rows)))))))
+
+(defn fit-sfx
+  "Pre-flight check for `draw-sfx` (single-line, not column-wrapped): the
+  font size `draw-sfx` will actually use, and whether the rendered string
+  width fits within `:max-width` (default 0.9) of the panel. `:fits? false`
+  means the caller should lower :scale — draw-sfx does not wrap or shrink
+  SFX text itself."
+  [text {:keys [scale panel-w] :or {scale 1.0}}]
+  (let [fsz (int (max 30 (* panel-w 0.16 (double scale))))
+        f (font Font/BOLD fsz)
+        fm (.getFontMetrics ^java.awt.Graphics2D @metrics-scratch f)
+        tw (.stringWidth fm (str text))]
+    {:font-size fsz :text-width tw :fits? (<= tw (* panel-w 0.9))}))
+
 ;; --- 効果線 (effectLines) + 視線誘導 (gaze) — ai.gftd.mangaka page lexicon ----
 ;; Both fields live on the panel in the lexicon's panel-local 0-1000 coordinate
 ;; space (both axes, independent of the panel's pixel size): {:centerX 480
@@ -521,6 +610,22 @@
 
 (def PAGE-W 1075) (def PAGE-H 1518)   ; B5 @ ~150dpi
 (def MARGIN 38) (def GUTTER 16)
+
+(defn panel-pixel-sizes
+  "The actual pixel {:id :w :h} compose-page! will draw each panel at, for
+  this `page` ({:layout :panels […]}) — i.e. `layout-page` run through the
+  same page-minus-margins math `compose-page!` itself uses. Callers use this
+  BEFORE compose-page! to size dialogue/SFX (see `fit-vertical-dialogue`/
+  `fit-sfx`) against real panel dimensions instead of guessing them."
+  [page]
+  (let [{:keys [bleed pairs]} (layout-page page)
+        m (if bleed 0 MARGIN) gut (if bleed 0 GUTTER)
+        cw (- PAGE-W (* 2 m)) ch (- PAGE-H (* 2 m))]
+    (mapv (fn [[panel [_px _py pw ph] _tilt]]
+            {:id (:id panel)
+             :w (- (* cw (/ pw 100.0)) gut)
+             :h (- (* ch (/ ph 100.0)) gut)})
+          pairs)))
 
 (defn compose-page!
   "Compose one storyboard `page` ({:layout :panels […]}) into a B5 PNG at `out`.
