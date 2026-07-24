@@ -364,6 +364,74 @@
       (doseq [[i ln] (map-indexed vector lines)]
         (.drawString g ^String ln (int (+ bx pad)) (int (+ by pad (* (inc i) lh) -6)))))))
 
+(defn tail-geometry
+  "Where a bubble's tail attaches and how far it reaches, as pure data (so
+  the shape is testable without a Graphics2D). The reference pages this
+  library's placement score is calibrated against (HUNTER×HUNTER 王位継承戦編)
+  draw tails as SHORT filled stubs on whichever bubble edge faces the
+  speaker — a pointer, not a leader line. The old rendering anchored the
+  tail on the bottom edge with a fixed 26px base and stretched the apex all
+  the way to the face: with a far-away speaker that degenerates into two
+  near-parallel lines crossing the whole panel (observed on a real genko
+  page — the single most visible defect after the boxes themselves were
+  fixed).
+
+  [bx by bw bh] the bubble rect in px, [target-x target-y] the speaker
+  point. Returns {:edge :l/:r/:t/:b, :base [[x1 y1] [x2 y2]] (on that edge),
+  :apex [x y]} — apex reach is clamped to ~35% of the gap to the target and
+  never more than 55px, so the stub points at the speaker without spanning
+  the distance. Returns nil if the target sits inside the bubble (no
+  direction to point)."
+  [[bx by bw bh] [target-x target-y]]
+  (let [bcx (+ bx (/ bw 2.0)) bcy (+ by (/ bh 2.0))
+        dx (- (double target-x) bcx) dy (- (double target-y) bcy)
+        dist (Math/sqrt (+ (* dx dx) (* dy dy)))]
+    (when (pos? dist)
+      (let [tx* (if (zero? dx) Double/MAX_VALUE
+                    (/ (- (if (pos? dx) (+ bx bw) bx) bcx) dx))
+            ty* (if (zero? dy) Double/MAX_VALUE
+                    (/ (- (if (pos? dy) (+ by bh) by) bcy) dy))
+            t (min tx* ty*)]
+        (when (< t 1.0)                       ; target outside the bubble
+          (let [edge (if (< tx* ty*) (if (pos? dx) :r :l) (if (pos? dy) :b :t))
+                ax (+ bcx (* t dx)) ay (+ bcy (* t dy))
+                gap (* dist (- 1.0 t))
+                stub (max 14.0 (min 55.0 (* 0.35 gap) (* 0.5 (min bw bh))))
+                ux (/ dx dist) uy (/ dy dist)
+                hb (max 8.0 (min 13.0 (* 0.11 (min bw bh))))
+                clamp (fn [v lo hi] (max lo (min hi v)))]
+            (case edge
+              (:t :b) (let [ey (if (= edge :b) (+ by bh -4) (+ by 4))
+                            cx* (clamp ax (+ bx hb 8) (- (+ bx bw) hb 8))]
+                        {:edge edge
+                         :base [[(- cx* hb) ey] [(+ cx* hb) ey]]
+                         :apex [(+ cx* (* stub ux)) (+ ey (* stub uy))]})
+              (:l :r) (let [ex (if (= edge :r) (+ bx bw -4) (+ bx 4))
+                            cy* (clamp ay (+ by hb 8) (- (+ by bh) hb 8))]
+                        {:edge edge
+                         :base [[ex (- cy* hb)] [ex (+ cy* hb)]]
+                         :apex [(+ ex (* stub ux)) (+ cy* (* stub uy))]}))))))))
+
+(defn- draw-tail!
+  "Render `tail-geometry` for a bubble: white filled stub, black outline,
+  then a white seam-cover where the base meets the bubble border."
+  [g geom shout?]
+  (when geom
+    (let [{:keys [edge base apex]} geom
+          [[x1 y1] [x2 y2]] base [ax ay] apex
+          txs (int-array [(int x1) (int x2) (int ax)])
+          tys (int-array [(int y1) (int y2) (int ay)])]
+      (doto g (.setColor Color/WHITE) (.fillPolygon txs tys 3)
+              (.setColor Color/BLACK)
+              (.setStroke (BasicStroke. (float (if shout? 5.0 3.0))))
+              (.drawPolygon txs tys 3)
+              (.setColor Color/WHITE))
+      (case edge
+        :b (.fillRect g (int (+ x1 2)) (int (- y1 3)) (int (- x2 x1 4)) 6)
+        :t (.fillRect g (int (+ x1 2)) (int (- y1 3)) (int (- x2 x1 4)) 6)
+        :l (.fillRect g (int (- x1 3)) (int (+ y1 2)) 6 (int (- y2 y1 4)))
+        :r (.fillRect g (int (- x1 3)) (int (+ y1 2)) 6 (int (- y2 y1 4)))))))
+
 (defn- bubble
   "Dialogue → a white rounded speech bubble with a tail + black outline + JP text.
   `cx` is the desired bubble centre; `side` (:l/:r) aims the tail. The optional
@@ -372,10 +440,13 @@
   and :font-role (kami.mangaka.expression's per-archetype/register typeface —
   :gothic/:mincho/:maru/:handwritten/… — see `font-role-families`; a speaker's
   dialogue actually changes typeface, not just weight/size).
+  :tail? false suppresses the tail entirely — the reference pages give a
+  tail only to the FIRST bubble of a speaker's consecutive chain; the 2nd+
+  just sit adjacent (see `layout-bubbles`).
   Returns bottom-y."
   [g text cx top w side & [{:keys [weight scale shape writing-mode columns
                                    width-ratio height-ratio panel-height tail-target
-                                   font-role]}]]
+                                   font-role tail?] :or {tail? true}}]]
   (when (and text (seq (str text)))
     (.setFont g (font font-role (weight->style weight) (scaled 25 scale)))
     (let [vertical? (= writing-mode "vertical-rtl")
@@ -392,17 +463,15 @@
           bx (- cx (/ bw 2.0)) by top
           rad (if shout? 8 38)
           rr (RoundRectangle2D$Double. bx by bw bh rad rad)
-          ;; tail: a small triangle dropping from the bubble toward the speaker
-          tailx (if (= side :r) (- (+ bx bw) (* bw 0.28)) (+ bx (* bw 0.16)))
-          [target-x target-y] (or tail-target
-                                  [(+ tailx (if (= side :r) -2 28)) (+ by bh 24)])
-          txs (int-array [(int tailx) (int (+ tailx 26)) (int target-x)])
-          tys (int-array [(int (+ by bh -4)) (int (+ by bh -4)) (int target-y)])]
-      (doto g (.setColor Color/WHITE) (.fillPolygon txs tys 3) (.fill rr)
+          geom (when tail?
+                 (tail-geometry [bx by bw bh]
+                                (or tail-target
+                                    [(+ bx (* bw (if (= side :r) 0.72 0.16)) 13)
+                                     (+ by bh 24)])))]
+      (doto g (.setColor Color/WHITE) (.fill rr)
               (.setColor Color/BLACK) (.setStroke (BasicStroke. (float (if shout? 5.0 3.0))))
-              (.drawPolygon txs tys 3) (.draw rr)
-              ;; paint over the seam where the tail meets the bubble
-              (.setColor Color/WHITE) (.fillRect (int (+ tailx 2)) (int (+ by bh -7)) 22 6))
+              (.draw rr))
+      (draw-tail! g geom shout?)
       (.setColor g (weight->color weight))
       (if vertical?
         (let [chars (seq (str text)) rows (max 1 (int (/ (- bh (* 2 pad)) lh)))]
@@ -539,6 +608,137 @@
         tw (.stringWidth fm (str text))]
     {:font-size fsz :text-width tw :fits? (<= tw (* panel-w 0.9))}))
 
+;; --- bubble layout (size + place + tail, one call) ---------------------------
+;; Grown on a real genko page (ghosthacker p2, 13 bubbles) where every panel
+;; needed the same dance by hand: pick a safe zone beside/above the speaker's
+;; face, size the text into it with fit-vertical-dialogue (shrinking :scale
+;; when the zone is tight), stack same-corner bubbles without collision, aim
+;; the tail. Three real bugs shipped past the hand-rolled version of this
+;; (illegible 1-row collapse, bubbles drawn despite :fits? false, stacked
+;; bubbles overlapping each other) — all three are structural here instead.
+
+(defn- rects-overlap? [[l1 t1 r1 b1] [l2 t2 r2 b2]]
+  (and (< l1 r2) (< l2 r1) (< t1 b2) (< t2 b1)))
+
+(defn layout-bubbles
+  "Size and place one panel's dialogue bubbles. `panel` needs the panel's
+  actual pixel :panel-w/:panel-h (from `panel-pixel-sizes`, NOT guessed);
+  `specs` is a vector of, per bubble:
+    :text / :speaker         the line and who says it (speaker may be nil)
+    :corner                  :tl/:tr/:bl/:br — which corner this bubble hugs
+    :face-bbox               [l t r b] 0-1: the speaker's face — bubbles are
+                             sized into the space BESIDE (x-strategy) or
+                             ABOVE (y-strategy) it, whichever fits at the
+                             larger scale
+    :below-face?             true = the strip above the face is thinner than
+                             the bubble's fixed padding (structurally
+                             impossible at any scale) — place BELOW instead
+    :scale :weight :font-role :bubble  style, as resolve-style returns
+    :target-height :min-aspect :max-width :scale-floor  fit tuning
+  Options :margin (default 0.045) / :gap (0.035) are the breathing margins
+  against the panel edge and between stacked bubbles.
+
+  Returns {:dialogue [...] :warnings [...]}: each dialogue entry is ready
+  for compose-page! (:pos/:width/:height/:scale/:tail-target/:tail?) and
+  carries :rect/:corner/:face-bbox/:fits?/:chained? for
+  panel-placement-score. Tail policy follows the reference pages: only the
+  FIRST bubble of a speaker's consecutive run gets a tail; the 2nd+ are
+  :tail? false and :chained? true (scored on adjacency to their
+  predecessor, not corner distance). Any :fits? false entry lands in
+  :warnings — it WILL render illegibly, fix the input (shorter line, more
+  room, below-face?) rather than shipping it."
+  [{:keys [panel-w panel-h margin gap] :or {margin 0.045 gap 0.035}} specs]
+  (let [scale-floor* 0.18
+        sized
+        (mapv (fn [{:keys [text corner face-bbox below-face? scale weight font-role
+                           target-height min-aspect max-width scale-floor] :as spec}]
+                (let [floor (or scale-floor scale-floor*)
+                      scale0 (or scale 0.95)
+                      buffer 0.02
+                      [fl ft fr fb] face-bbox
+                      x-safe-w (when (and face-bbox (not below-face?))
+                                 (case corner
+                                   (:tl :bl) (when (> fl margin) (- fl margin buffer))
+                                   (:tr :br) (when (< fr (- 1.0 margin))
+                                               (- (- 1.0 margin) fr buffer))
+                                   nil))
+                      y-safe-h (when face-bbox
+                                 (if below-face?
+                                   (max 0.05 (- 1.0 margin fb buffer))
+                                   (max 0.05 (- ft margin buffer))))
+                      try-strategy
+                      (fn [max-w* max-h*]
+                        (let [try-fit (fn [s]
+                                        (fit-vertical-dialogue
+                                         text {:scale s :weight weight :font-role font-role
+                                               :panel-w panel-w :panel-h panel-h
+                                               :target-height (min (or target-height 0.4) max-h*)
+                                               :max-height max-h* :max-width max-w*
+                                               :min-aspect (or min-aspect 0.3)}))]
+                          (loop [s scale0]
+                            (let [f (try-fit s)]
+                              (cond
+                                (and (:fits? f) (<= (:height f) (+ max-h* 0.01))) [s f]
+                                (<= s floor) [s f :failed]
+                                :else (recur (- s 0.02)))))))
+                      x-result (when (and x-safe-w (>= x-safe-w 0.18))
+                                 (try-strategy (min (or max-width 0.94) x-safe-w) 0.94))
+                      y-result (when face-bbox
+                                 (try-strategy (or max-width 0.94) y-safe-h))
+                      no-face-result (when-not face-bbox
+                                       (try-strategy (or max-width 0.94) 0.94))
+                      candidates (remove nil? [x-result y-result no-face-result])
+                      [s fit failed] (first (sort-by (fn [[s _ f]] [(boolean f) (- s)])
+                                                     candidates))]
+                  (assoc spec :scale s :width (:width fit) :height (:height fit)
+                         :fits? (and (:fits? fit) (not failed)))))
+              specs)
+        placed
+        (loop [in sized placed []]
+          (if (empty? in)
+            placed
+            (let [{:keys [corner width height face-bbox below-face?] :as b} (first in)
+                  left (case corner
+                         (:tl :bl) margin
+                         (:tr :br) (- 1.0 margin width)
+                         margin)
+                  left (max margin (min left (- 1.0 margin width)))
+                  top-start (if (and below-face? face-bbox)
+                              (+ (nth face-bbox 3) 0.02)
+                              margin)
+                  top (loop [top top-start]
+                        (let [cand [left top (+ left width) (+ top height)]]
+                          (if (or (> (+ top height) (- 1.0 margin))
+                                  (not-any? #(rects-overlap? cand %) (map :rect placed)))
+                            top
+                            (recur (+ top gap)))))]
+              (recur (rest in)
+                     (conj placed
+                           (assoc b :pos [(+ left (/ width 2.0)) top]
+                                  :rect [left top (+ left width) (+ top height)]))))))
+        chain-key (fn [b] (or (:speaker b) (:face-bbox b)))
+        dialogue
+        (first
+         (reduce (fn [[out seen] b]
+                   (let [k (chain-key b)
+                         prev (get seen k)
+                         face (:face-bbox b)
+                         tail-target (when (and face (not prev))
+                                       [(/ (+ (nth face 0) (nth face 2)) 2.0)
+                                        (/ (+ (nth face 1) (nth face 3)) 2.0)])]
+                     [(conj out (cond-> (assoc b
+                                               :writing-mode (or (:writing-mode b) "vertical-rtl")
+                                               :tail? (nil? prev))
+                                  tail-target (assoc :tail-target tail-target)
+                                  prev (assoc :chained? true :prev-rect (:rect prev))))
+                      (assoc seen k b)]))
+                 [[] {}] placed))]
+    {:dialogue dialogue
+     :warnings (vec (for [d dialogue :when (false? (:fits? d))]
+                      {:text (:text d) :speaker (:speaker d)
+                       :reason :does-not-fit
+                       :hint "shorter line / :below-face? / larger safe zone — this WILL render illegibly"}))}))
+
 ;; --- bubble placement score (HUNTER×HUNTER 王位継承戦編 baseline) --------------
 ;; Not "does the text fit its own box" (fit-vertical-dialogue already
 ;; guarantees that) but "is the box PLACED the way this library's own
@@ -571,6 +771,19 @@
                   false 1.0 — an unmeasured dimension must read as
                   unmeasured, not as passing)
     :corner       :tl/:tr/:bl/:br this bubble was authored to hug, or nil
+    :prev-rect    for the 2nd+ bubble of a speaker's consecutive chain (see
+                  `layout-bubbles` :chained?): the PREVIOUS bubble's rect.
+                  The reference pages never re-hug a corner mid-chain — the
+                  follow-up bubble sits adjacent to its predecessor, so
+                  when :prev-rect is given, :corner-hug measures adjacency
+                  to it instead of distance to a corner (a chained bubble
+                  used to eat an unconditional corner-hug=0, a false
+                  penalty for the reference layout itself)
+    :fits?        fit-vertical-dialogue's verdict, if the caller has it —
+                  scores :legible 1.0/0.0. A box that draws characters past
+                  its own edge is the worst defect on the page and used to
+                  be INVISIBLE to this score (0.865-scoring page shipped
+                  two unreadable bubbles)
     :tail-target  [x y] the tail's endpoint, or nil
     :tilted?      true if this panel/row used a force-line shear (default
                   false — komawari_styles.edn's Togashi baseline is
@@ -578,11 +791,12 @@
                   explicitly, not silently score as violating their OWN
                   style)
 
-  Returns {:face-clear :corner-hug :tail-on-speaker :rectilinear :score}.
-  Each dimension is 0-1 or nil (not measured); :score is the weighted mean
-  of the non-nil dimensions — nil dimensions are excluded, not defaulted,
-  so an incomplete input can't average up to a flattering score."
-  [{:keys [bubble-rect panel-rect face-bbox corner tail-target tilted?]
+  Returns {:face-clear :corner-hug :tail-on-speaker :rectilinear :legible
+  :score}. Each dimension is 0-1 or nil (not measured); :score is the
+  weighted mean of the non-nil dimensions — nil dimensions are excluded,
+  not defaulted, so an incomplete input can't average up to a flattering
+  score."
+  [{:keys [bubble-rect panel-rect face-bbox corner prev-rect fits? tail-target tilted?]
     :or {panel-rect [0.0 0.0 1.0 1.0] tilted? false}}]
   (let [face-clear (when face-bbox
                       (let [overlap (rect-overlap-area bubble-rect face-bbox)
@@ -591,17 +805,27 @@
                             (max 0.0 (- 1.0 (* 3.0 (/ overlap ba)))))))
         [bl bt br bb] bubble-rect
         [pl pt pr pb] panel-rect
-        corner-hug (when corner
+        margin 0.15
+        corner-hug (cond
+                     prev-rect
+                     (let [[ql qt qr qb] prev-rect
+                           gx (max 0.0 (- bl qr) (- ql br))
+                           gy (max 0.0 (- bt qb) (- qt bb))
+                           d (max gx gy)]
+                       (- 1.0 (min 1.0 (/ d margin))))
+                     corner
                      (let [dx (case corner (:tl :bl) (- bl pl) (:tr :br) (- pr br))
-                           dy (case corner (:tl :tr) (- bt pt) (:bl :br) (- pb bb))
-                           margin 0.15]
+                           dy (case corner (:tl :tr) (- bt pt) (:bl :br) (- pb bb))]
                        (- 1.0 (min 1.0 (/ (max 0.0 dx dy) margin)))))
         tail-on-speaker (when (and tail-target face-bbox)
                           (if (point-in-rect? tail-target face-bbox) 1.0 0.0))
         rectilinear (if tilted? 0.0 1.0)
-        weights {:face-clear 0.45 :tail-on-speaker 0.2 :corner-hug 0.2 :rectilinear 0.15}
+        legible (when (some? fits?) (if fits? 1.0 0.0))
+        weights {:face-clear 0.45 :tail-on-speaker 0.2 :corner-hug 0.2
+                 :rectilinear 0.15 :legible 0.45}
         dims {:face-clear face-clear :corner-hug corner-hug
-              :tail-on-speaker tail-on-speaker :rectilinear rectilinear}
+              :tail-on-speaker tail-on-speaker :rectilinear rectilinear
+              :legible legible}
         measured (into {} (filter (comp some? val)) dims)
         wsum (reduce + (map weights (keys measured)))
         score (when (pos? wsum)
@@ -611,13 +835,31 @@
 (defn panel-placement-score
   "bubble-placement-score for every dialogue entry in one placed panel (each
   entry needs :bubble-rect and, to be scored on face-clearance/tail
-  accuracy, :face-bbox/:tail-target/:corner) -> {:bubbles […] :score
-  (mean of the bubbles' own :score, nil-safe)}."
+  accuracy, :face-bbox/:tail-target/:corner — plus :prev-rect/:fits? per
+  bubble-placement-score) -> {:bubbles […] :bubble-overlap 0-1 :score}.
+
+  :bubble-overlap is a PANEL-level axis the per-bubble scores can't see:
+  bubbles that overlap EACH OTHER hide each other's text (a 3-bubble
+  monologue stack once rendered with each box 65-71% of panel height, all
+  three overlapping — every individual bubble scored fine). Computed as
+  1 - min(1, 5 * pairwise-overlap-area / total-bubble-area) and MULTIPLIED
+  into :score, not averaged — mutually-hidden text corrupts the whole
+  panel, a good mean shouldn't dilute it."
   [bubbles]
   (let [scored (mapv bubble-placement-score bubbles)
-        scores (keep :score scored)]
+        scores (keep :score scored)
+        rects (keep :bubble-rect bubbles)
+        pair-overlap (reduce + 0.0 (for [[i r1] (map-indexed vector rects)
+                                          r2 (drop (inc i) rects)]
+                                      (rect-overlap-area r1 r2)))
+        total-area (reduce + 0.0 (map rect-area rects))
+        bubble-overlap (if (pos? total-area)
+                         (- 1.0 (min 1.0 (* 5.0 (/ pair-overlap total-area))))
+                         1.0)]
     {:bubbles scored
-     :score (when (seq scores) (/ (reduce + scores) (count scores)))}))
+     :bubble-overlap bubble-overlap
+     :score (when (seq scores)
+              (* bubble-overlap (/ (reduce + scores) (count scores))))}))
 ;; Both fields live on the panel in the lexicon's panel-local 0-1000 coordinate
 ;; space (both axes, independent of the panel's pixel size): {:centerX 480
 ;; :centerY 450} means 48% across / 45% down the panel rect. Z-order per the
@@ -831,7 +1073,8 @@
                                   :writing-mode (:writing-mode d) :columns (:columns d)
                                   :width-ratio (:width d) :height-ratio (:height d)
                                   :panel-height h :font-role (:font-role d)
-                                  :tail-target target})]
+                                  :tail-target target
+                                  :tail? (if (contains? d :tail?) (:tail? d) true)})]
                   (recur (rest ds) (or nt (+ top 96)))))))
           (doseq [s sfxs] (draw-sfx g (t/localize (:text s) locale) x y w (:scale s) (:font-role s)))
           (doseq [np nps] (nameplate! g (t/localize (:text np) locale) x y w h)))
