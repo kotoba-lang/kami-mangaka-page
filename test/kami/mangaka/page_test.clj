@@ -394,3 +394,126 @@
                  {:bubble-rect [0.6 0.6 0.9 0.9] :face-bbox [0.1 0.1 0.4 0.4]}])]
     (is (= 2 (count (:bubbles result))))
     (is (some? (:score result)))))
+
+;; --- tail-geometry: short stub anchored on the edge facing the speaker -------
+;; The defect this replaces: a tail always dropped from the bottom edge with
+;; its apex stretched ALL the way to the face — with a far speaker that reads
+;; as two near-parallel lines crossing the panel, not a manga tail.
+
+(deftest tail-geometry-anchors-on-the-edge-facing-the-target
+  (let [rect [500.0 100.0 200.0 100.0]]        ; bubble x500-700, y100-200
+    (is (= :l (:edge (page/tail-geometry rect [100.0 150.0]))))
+    (is (= :r (:edge (page/tail-geometry rect [900.0 150.0]))))
+    (is (= :t (:edge (page/tail-geometry rect [600.0 -300.0]))))
+    (is (= :b (:edge (page/tail-geometry rect [600.0 600.0]))))))
+
+(deftest tail-geometry-stub-is-short-not-a-leader-line
+  (testing "a speaker 400px away gets a stub apex, not a 400px reach"
+    (let [{:keys [base apex]} (page/tail-geometry [500.0 100.0 200.0 100.0]
+                                                   [100.0 150.0])
+          [[x1 _] [_ _]] base [ax _] apex]
+      (is (< (Math/abs (- x1 ax)) 60.0)
+          "apex must stay within the 55px stub clamp of its base edge")
+      (is (> ax 400.0) "apex points toward the speaker but nowhere near x=100"))))
+
+(deftest tail-geometry-nil-when-target-inside-the-bubble
+  (is (nil? (page/tail-geometry [0.0 0.0 100.0 100.0] [50.0 50.0]))
+      "no direction to point at — a tail into the bubble's own text is garbage"))
+
+;; --- layout-bubbles ----------------------------------------------------------
+
+(def ^:private half-panel {:panel-w 483.5 :panel-h 316.77})
+
+(deftest layout-bubbles-places-a-corner-bubble-at-the-margin
+  (let [{:keys [dialogue warnings]}
+        (page/layout-bubbles half-panel
+                             [{:text "それ俺の・・・なんだけど" :speaker "Ren"
+                               :corner :tl :scale 0.5
+                               :face-bbox [0.63 0.2 0.85 0.48]}])
+        [d] dialogue
+        [l t _ _] (:rect d)]
+    (is (empty? warnings))
+    (is (true? (:fits? d)))
+    (is (< (Math/abs (- l 0.045)) 1e-9) "left edge sits AT the margin")
+    (is (< (Math/abs (- t 0.045)) 1e-9))
+    (is (true? (:tail? d)))
+    (let [[tx ty] (:tail-target d)]
+      (is (< (Math/abs (- tx 0.74)) 1e-6) "tail aims at the face-bbox centre x")
+      (is (< (Math/abs (- ty 0.34)) 1e-6) "tail aims at the face-bbox centre y"))))
+
+(deftest layout-bubbles-stacks-same-corner-bubbles-without-overlap
+  (let [{:keys [dialogue]}
+        (page/layout-bubbles half-panel
+                             [{:text "沼野くん、今日も寝てた。" :speaker "Yuto"
+                               :corner :tr :scale 0.35
+                               :face-bbox [0.15 0.25 0.55 0.75]}
+                              {:text "授業は聞いてないのに、" :speaker "Yuto"
+                               :corner :tr :scale 0.35
+                               :face-bbox [0.15 0.25 0.55 0.75]}])
+        [a b] dialogue
+        [_ _at _ ab] (:rect a)
+        [_ bt _ _] (:rect b)]
+    (is (>= bt ab) "second bubble starts below the first, no overlap")
+    (is (true? (:tail? a)) "first of the chain gets the tail")
+    (is (false? (:tail? b)) "the follow-up does NOT — reference-page convention")
+    (is (true? (:chained? b)))
+    (is (= (:rect a) (:prev-rect b)))
+    (is (nil? (:tail-target b)))))
+
+(deftest layout-bubbles-below-face-places-under-the-face
+  (let [{:keys [dialogue]}
+        (page/layout-bubbles half-panel
+                             [{:text "怠惰がおれの美徳なんだよ..." :speaker "Ren"
+                               :corner :tr :scale 0.42 :below-face? true
+                               :face-bbox [0.65 0.15 0.88 0.45]}])
+        [d] dialogue
+        [_ t _ _] (:rect d)]
+    (is (true? (:fits? d)))
+    (is (>= t 0.45) "bubble top starts below the face's bottom edge")))
+
+(deftest layout-bubbles-flags-what-cannot-fit-instead-of-shipping-it
+  (testing "a long line forced above a face whose safe strip is thinner than
+            the bubble's own padding: :fits? false lands in :warnings — the
+            exact bug that shipped two invisible bubbles on a real page"
+    (let [{:keys [dialogue warnings]}
+          (page/layout-bubbles half-panel
+                               [{:text "起きないと、コメッコンの米粉ドーナツ、わたしが、全部食べるよ"
+                                 :speaker "Nei" :corner :tl :scale 0.4
+                                 :max-width 0.4
+                                 :face-bbox [0.05 0.12 0.95 0.9]}])]
+      (is (false? (:fits? (first dialogue))))
+      (is (= 1 (count warnings)))
+      (is (= :does-not-fit (:reason (first warnings)))))))
+
+;; --- score additions: chain-hug / legible / bubble-overlap -------------------
+
+(deftest bubble-placement-score-chained-bubble-scores-adjacency-not-corner
+  (let [adjacent (page/bubble-placement-score
+                  {:bubble-rect [0.5 0.4 0.8 0.6] :prev-rect [0.5 0.05 0.8 0.38]})
+        drifted (page/bubble-placement-score
+                 {:bubble-rect [0.5 0.7 0.8 0.9] :prev-rect [0.5 0.05 0.8 0.38]})]
+    (is (> (:corner-hug adjacent) 0.85)
+        "a chained bubble sitting just under its predecessor is a GOOD layout")
+    (is (< (:corner-hug drifted) (:corner-hug adjacent)))))
+
+(deftest bubble-placement-score-illegible-box-cannot-score-well
+  (let [legible (page/bubble-placement-score
+                 {:bubble-rect [0.02 0.02 0.4 0.3] :corner :tl :fits? true})
+        illegible (page/bubble-placement-score
+                   {:bubble-rect [0.02 0.02 0.4 0.3] :corner :tl :fits? false})]
+    (is (= 1.0 (:legible legible)))
+    (is (= 0.0 (:legible illegible)))
+    (is (< (:score illegible) 0.7)
+        "0.865 pages used to ship unreadable bubbles — :fits? false must bite")))
+
+(deftest panel-placement-score-mutual-overlap-penalizes-the-panel
+  (let [stacked (page/panel-placement-score
+                 [{:bubble-rect [0.5 0.05 0.85 0.3] :corner :tr}
+                  {:bubble-rect [0.5 0.35 0.85 0.6] :corner :tr}])
+        piled (page/panel-placement-score
+               [{:bubble-rect [0.5 0.05 0.85 0.7] :corner :tr}
+                {:bubble-rect [0.5 0.1 0.85 0.75] :corner :tr}])]
+    (is (= 1.0 (:bubble-overlap stacked)))
+    (is (< (:bubble-overlap piled) 0.5)
+        "boxes hiding each other's text: the 3-bubble monologue pileup bug")
+    (is (< (:score piled) (:score stacked)))))
