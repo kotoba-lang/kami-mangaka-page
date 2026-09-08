@@ -13,7 +13,7 @@
   the web reader uses — image stays language-neutral. No story, character, or world.
   JVM/Java2D headless — no Canvas-2D, no GPU (page DTP, not the wgpu render path)."
   (:require [clojure.java.io :as io]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kami.mangaka.text :as t])
   (:import [java.awt Color Font BasicStroke RenderingHints GraphicsEnvironment
                      RadialGradientPaint GradientPaint]
@@ -93,7 +93,7 @@
 ;; so the composition follows the artist's ネーム, not a generic grid.
 
 (defn- size-weight [s]
-  (let [s (str/lower-case (str s))]
+  (let [s (str/lower (str s))]
     (cond (re-find #"full" s)            2.6
           (re-find #"two-thirds|wide" s) 2.0
           (re-find #"half" s)            1.5
@@ -101,7 +101,7 @@
           :else 1.5)))
 
 (defn- small? [s]
-  (boolean (re-find #"one-third|narrow|half" (str/lower-case (str s)))))
+  (boolean (re-find #"one-third|narrow|half" (str/lower (str s)))))
 
 (defn- rows-of
   "Pack panels into rows (reading order): two consecutive small panels share a
@@ -123,7 +123,7 @@
   those keys, so pre-existing callers see byte-identical `pairs` rects."
   [page]
   (let [ps (:panels page) n (count ps)
-        lay (str/lower-case (str (:layout page)))]
+        lay (str/lower (str (:layout page)))]
     (cond
       ;; Authored Genko/storyboard geometry is authoritative. Values use the
       ;; portable normalized [x y w h] contract; convert to this compositor's
@@ -991,7 +991,7 @@
     (let [g2 (.create g)]
       (try
         (.setClip g2 (int x) (int y) (int w) (int h))
-        (let [kind (keyword (str/lower-case (name (or kind :focus))))
+        (let [kind (keyword (str/lower (name (or kind :focus))))
               n    (int (min 240 (max 4 (long (if (number? density) density 32)))))
               cov  (double (if (number? coverage) coverage 70))
               cx   (fx->px centerX x w)
