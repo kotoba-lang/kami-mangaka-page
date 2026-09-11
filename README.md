@@ -102,8 +102,8 @@ Without `:gaze-overlay? true` the output is byte-identical whether or not
 ## Test
 
 ```bash
-clojure -M:test   # templates / layout (splash·grid·ネーム rows) / komawari propose+validate / headless compose-page!
-clojure -M:lint   # clj-kondo, matches CI (.github/workflows/ci.yml)
+kbb -M:test   # templates / layout (splash·grid·ネーム rows) / komawari propose+validate / headless compose-page!
+kbb -M:lint   # clj-kondo, matches CI (.github/workflows/ci.yml)
 ```
 
 `kami-mangaka-text` (the shared multilingual lettering dependency) is its own
