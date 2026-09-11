@@ -1,5 +1,5 @@
 ;; Originally generated from bb.edn (ADR-2607173000 Wave 3); repaired 2026-08-13
-;; (ADR-2608131600).  nbb scripts/run-task.cljs <task> [args…]
+;; (ADR-2608131600).  nbb scripts/run-task.cljk <task> [args…]
 ;;
 ;; The Wave-3 conversion emitted an EMPTY registry here and deleted bb.edn, so
 ;; this repo had no runnable entrypoint at all from 2026-07-17 until today.
