@@ -1,5 +1,5 @@
 (ns kami.mangaka.page-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [kami.mangaka.page :as page])
   (:import [javax.imageio ImageIO]))
