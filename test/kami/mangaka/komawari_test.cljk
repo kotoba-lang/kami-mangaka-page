@@ -1,5 +1,5 @@
 (ns kami.mangaka.komawari-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kami.mangaka.komawari :as k]))
 
 (deftest golden-ratio-proportions
