@@ -12,7 +12,7 @@
   `:locale`, so the baked page (EPUB/KDP/print) is multilingual from the same data
   the web reader uses — image stays language-neutral. No story, character, or world.
   JVM/Java2D headless — no Canvas-2D, no GPU (page DTP, not the wgpu render path)."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.io :as io]
             [kotoba.lang.text :as str]
             [kami.mangaka.text :as t])
   (:import [java.awt Color Font BasicStroke RenderingHints GraphicsEnvironment
